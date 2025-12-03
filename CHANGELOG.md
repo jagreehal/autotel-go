@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.0] - 2025-12-03
+
 ### Breaking Changes
 
 - **Renamed `OTLPHeaders` to `Headers`** - The `Config.OTLPHeaders` field is now `Config.Headers`, and `WithOTLPHeaders()` is now `WithHeaders()`. This aligns with the TypeScript package naming.
