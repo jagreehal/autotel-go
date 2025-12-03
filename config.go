@@ -85,8 +85,8 @@ type Config struct {
 	// BackendPreset enables vendor presets (datadog, honeycomb, grafana, default otlp).
 	BackendPreset string
 
-	// OTLPHeaders are additional headers sent to the exporter (API keys, datasets, etc.).
-	OTLPHeaders map[string]string
+	// Headers are additional headers sent to the exporter (API keys, datasets, etc.).
+	Headers map[string]string
 
 	// ResourceAttributes are additional resource attributes to attach to all traces/metrics.
 	ResourceAttributes map[string]string

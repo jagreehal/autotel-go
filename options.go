@@ -137,14 +137,14 @@ func WithBackend(name string) Option {
 	}
 }
 
-// WithOTLPHeaders adds custom OTLP headers (API keys, datasets, etc.).
-func WithOTLPHeaders(headers map[string]string) Option {
+// WithHeaders adds custom headers to OTLP exporters (API keys, datasets, etc.).
+func WithHeaders(headers map[string]string) Option {
 	return func(c *Config) {
-		if c.OTLPHeaders == nil {
-			c.OTLPHeaders = make(map[string]string)
+		if c.Headers == nil {
+			c.Headers = make(map[string]string)
 		}
 		for k, v := range headers {
-			c.OTLPHeaders[k] = v
+			c.Headers[k] = v
 		}
 	}
 }

@@ -260,6 +260,141 @@ func Track(ctx context.Context, event string, properties map[string]any) {
 	}
 }
 
+// TrackFunnelStep tracks a funnel step event with a predefined status.
+// The event is automatically enriched with trace_id and span_id if a span is active.
+//
+// Example:
+//
+//	autotel.TrackFunnelStep(ctx, "checkout", autotel.FunnelStarted, map[string]any{
+//	    "user_id": userID,
+//	})
+func TrackFunnelStep(ctx context.Context, funnelName string, step FunnelStatus, properties map[string]any) {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return
+	}
+
+	props := make(map[string]any)
+	for k, v := range properties {
+		props[k] = v
+	}
+	props["funnel_name"] = funnelName
+	props["funnel_status"] = string(step)
+
+	eventName := "funnel." + funnelName + "." + string(step)
+	tracker.Track(ctx, eventName, props)
+}
+
+// TrackFunnelProgression tracks progression through a multi-step funnel with custom step names.
+// The event is automatically enriched with trace_id and span_id if a span is active.
+//
+// Example:
+//
+//	autotel.TrackFunnelProgression(ctx, "onboarding", "verify_email", 2, map[string]any{
+//	    "user_id": userID,
+//	})
+func TrackFunnelProgression(ctx context.Context, funnelName string, stepName string, stepNumber int, properties map[string]any) {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return
+	}
+
+	props := make(map[string]any)
+	for k, v := range properties {
+		props[k] = v
+	}
+	props["funnel_name"] = funnelName
+	props["step_name"] = stepName
+	props["step_number"] = stepNumber
+
+	eventName := "funnel." + funnelName + ".step"
+	tracker.Track(ctx, eventName, props)
+}
+
+// TrackOutcome tracks the outcome of an operation.
+// The event is automatically enriched with trace_id and span_id if a span is active.
+//
+// Example:
+//
+//	autotel.TrackOutcome(ctx, "payment_processing", autotel.OutcomeSuccess, map[string]any{
+//	    "amount": 99.99,
+//	})
+func TrackOutcome(ctx context.Context, operationName string, outcome OutcomeStatus, properties map[string]any) {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return
+	}
+
+	props := make(map[string]any)
+	for k, v := range properties {
+		props[k] = v
+	}
+	props["operation_name"] = operationName
+	props["outcome"] = string(outcome)
+
+	eventName := "outcome." + operationName
+	tracker.Track(ctx, eventName, props)
+}
+
+// TrackValue tracks a numeric value event.
+// The event is automatically enriched with trace_id and span_id if a span is active.
+//
+// Example:
+//
+//	autotel.TrackValue(ctx, "order_total", 149.99, map[string]any{
+//	    "currency": "USD",
+//	})
+func TrackValue(ctx context.Context, name string, value float64, properties map[string]any) {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return
+	}
+
+	props := make(map[string]any)
+	for k, v := range properties {
+		props[k] = v
+	}
+	props["value"] = value
+
+	eventName := "value." + name
+	tracker.Track(ctx, eventName, props)
+}
+
+// TrackBatch tracks multiple events at once.
+// Each event is automatically enriched with trace_id and span_id if a span is active.
+//
+// Example:
+//
+//	autotel.TrackBatch(ctx, []autotel.Event{
+//	    {Name: "page_view", Properties: map[string]any{"page": "/home"}},
+//	    {Name: "button_click", Properties: map[string]any{"button": "signup"}},
+//	})
+func TrackBatch(ctx context.Context, events []Event) {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return
+	}
+
+	for _, event := range events {
+		tracker.Track(ctx, event.Name, event.Properties)
+	}
+}
+
 func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) error {
 	if !cfg.MetricsEnabled {
 		return nil
@@ -293,7 +428,7 @@ func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporte
 	if cfg.Protocol == ProtocolHTTP {
 		httpOpts := []otlptmetricOption{
 			otlptmetricWithEndpoint(cfg.Endpoint),
-			otlptmetricWithHeaders(cfg.OTLPHeaders),
+			otlptmetricWithHeaders(cfg.Headers),
 			otlptmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 		}
 		if cfg.Insecure {
@@ -304,7 +439,7 @@ func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporte
 
 	grpcOpts := []otlpgmetricOption{
 		otlpgmetricWithEndpoint(cfg.Endpoint),
-		otlpgmetricWithHeaders(cfg.OTLPHeaders),
+		otlpgmetricWithHeaders(cfg.Headers),
 		otlpgmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
 	if cfg.Insecure {
@@ -358,7 +493,7 @@ func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, erro
 	if cfg.Protocol == ProtocolHTTP {
 		httpOpts := []otlptracehttp.Option{
 			otlptracehttp.WithEndpoint(cfg.Endpoint),
-			otlptracehttp.WithHeaders(cfg.OTLPHeaders),
+			otlptracehttp.WithHeaders(cfg.Headers),
 			otlptracehttp.WithTimeout(cfg.BatchTimeout + 5*time.Second),
 		}
 		if cfg.Insecure {
@@ -369,7 +504,7 @@ func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, erro
 
 	grpcOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(cfg.Endpoint),
-		otlptracegrpc.WithHeaders(cfg.OTLPHeaders),
+		otlptracegrpc.WithHeaders(cfg.Headers),
 		otlptracegrpc.WithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
 	if cfg.Insecure {
@@ -389,9 +524,9 @@ func applyBackendPreset(cfg *Config) {
 		cfg.Insecure = false
 		ensureHeaders(cfg)
 		if key := os.Getenv("DD_API_KEY"); key != "" {
-			cfg.OTLPHeaders["DD-API-KEY"] = key
+			cfg.Headers["DD-API-KEY"] = key
 		}
-		cfg.OTLPHeaders["X-Datadog-Origin"] = "otlp"
+		cfg.Headers["X-Datadog-Origin"] = "otlp"
 	case "honeycomb", "hny":
 		if cfg.Endpoint == "" || cfg.Endpoint == "localhost:4318" {
 			cfg.Endpoint = "api.honeycomb.io:443"
@@ -400,10 +535,10 @@ func applyBackendPreset(cfg *Config) {
 		cfg.Insecure = false
 		ensureHeaders(cfg)
 		if key := os.Getenv("HONEYCOMB_API_KEY"); key != "" {
-			cfg.OTLPHeaders["x-honeycomb-team"] = key
+			cfg.Headers["x-honeycomb-team"] = key
 		}
 		if dataset := os.Getenv("HONEYCOMB_DATASET"); dataset != "" {
-			cfg.OTLPHeaders["x-honeycomb-dataset"] = dataset
+			cfg.Headers["x-honeycomb-dataset"] = dataset
 		}
 	case "grafana", "grafana-cloud", "grafana_cloud":
 		if cfg.Endpoint == "" || cfg.Endpoint == "localhost:4318" {
@@ -413,7 +548,7 @@ func applyBackendPreset(cfg *Config) {
 		cfg.Insecure = false
 		ensureHeaders(cfg)
 		if key := os.Getenv("GRAFANA_OTLP_API_KEY"); key != "" {
-			cfg.OTLPHeaders["Authorization"] = "Bearer " + key
+			cfg.Headers["Authorization"] = "Bearer " + key
 		}
 	default:
 		// OTLP defaults already set
@@ -421,7 +556,7 @@ func applyBackendPreset(cfg *Config) {
 }
 
 func ensureHeaders(cfg *Config) {
-	if cfg.OTLPHeaders == nil {
-		cfg.OTLPHeaders = make(map[string]string)
+	if cfg.Headers == nil {
+		cfg.Headers = make(map[string]string)
 	}
 }

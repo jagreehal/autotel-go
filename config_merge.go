@@ -23,7 +23,7 @@ func applyEnvLayer(target *Config, env *Config) {
 	applyStringIfSet(&target.ServiceName, env.ServiceName)
 	applyStringIfSet(&target.Endpoint, env.Endpoint)
 	applyProtocolIfSet(&target.Protocol, env.Protocol)
-	target.OTLPHeaders = copyMapIfSet(target.OTLPHeaders, env.OTLPHeaders)
+	target.Headers = copyMapIfSet(target.Headers, env.Headers)
 	target.ResourceAttributes = copyMapIfSet(target.ResourceAttributes, env.ResourceAttributes)
 }
 
@@ -38,7 +38,7 @@ func applyYAMLLayer(target *Config, yaml *Config) {
 	applyStringIfSet(&target.Environment, yaml.Environment)
 	applyStringIfSet(&target.Endpoint, yaml.Endpoint)
 	applyProtocolIfSet(&target.Protocol, yaml.Protocol)
-	target.OTLPHeaders = mergeMapIfSet(target.OTLPHeaders, yaml.OTLPHeaders)
+	target.Headers = mergeMapIfSet(target.Headers, yaml.Headers)
 	target.ResourceAttributes = mergeMapIfSet(target.ResourceAttributes, yaml.ResourceAttributes)
 
 	if yaml.Debug != nil {
@@ -58,7 +58,7 @@ func applyExplicitLayer(target *Config, explicit *Config) {
 	applyStringIfSet(&target.Environment, explicit.Environment)
 	applyStringIfSet(&target.Endpoint, explicit.Endpoint)
 	applyProtocolIfSet(&target.Protocol, explicit.Protocol)
-	target.OTLPHeaders = mergeMapIfSet(target.OTLPHeaders, explicit.OTLPHeaders)
+	target.Headers = mergeMapIfSet(target.Headers, explicit.Headers)
 	target.ResourceAttributes = mergeMapIfSet(target.ResourceAttributes, explicit.ResourceAttributes)
 
 	if explicit.Debug != nil {
