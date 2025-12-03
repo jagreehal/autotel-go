@@ -1,0 +1,33 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go module files (keep go.sum)
+vendor/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage files
+coverage.out
+coverage.html
+*.coverprofile
+
+# Build directories
+bin/
+build/
+
+# Local environment files
+.env
+.env.*
+
+# Linting and formatting tool caches
+golangci-lint.cache
+.DS_Store

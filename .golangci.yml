@@ -1,0 +1,19 @@
+linters:
+  enable:
+    - goimports
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - misspell
+    - unconvert
+    - gocyclo
+    - gocritic
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/jagreehal/autotel-go
+  gocyclo:
+    min-complexity: 15
