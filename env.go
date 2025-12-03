@@ -33,7 +33,7 @@ func resolveEnvConfig() *Config {
 
 	// OTEL_EXPORTER_OTLP_HEADERS - optional string
 	if headers := parseHeadersEnv(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")); len(headers) > 0 {
-		cfg.OTLPHeaders = headers
+		cfg.Headers = headers
 	}
 
 	// OTEL_RESOURCE_ATTRIBUTES - optional string (key1=value1,key2=value2)

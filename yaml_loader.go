@@ -150,7 +150,7 @@ func yamlToConfig(yaml *yamlConfig) *Config {
 		}
 	}
 	if len(yaml.Exporter.Headers) > 0 {
-		cfg.OTLPHeaders = yaml.Exporter.Headers
+		cfg.Headers = yaml.Exporter.Headers
 	}
 
 	// Resource attributes

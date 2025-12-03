@@ -43,7 +43,7 @@ func main() {
 - Environment variables: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`, `AUTOTEL_DEBUG`, etc.
 - Explicit parameters override env vars
 - No OTLP exporters run unless you set `WithEndpoint(...)` or the OTEL env vars—making debug-only or subscriber-only setups zero-config.
-- Vendor presets (OTLP-first): `WithBackend("datadog"|"honeycomb"|"grafana")` sets endpoint + headers; use `WithOTLPHeaders` for API keys/datasets without extra SDKs.
+- Vendor presets (OTLP-first): `WithBackend("datadog"|"honeycomb"|"grafana")` sets endpoint + headers; use `WithHeaders` for API keys/datasets without extra SDKs.
 - Metrics on by default: OTLP metric exporter is wired alongside traces. Toggle with `WithMetrics(false)` or customize with `WithMetricExporters`/`WithMetricInterval`.
 
 #### Environment variables (optional)
