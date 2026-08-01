@@ -16,6 +16,13 @@ All notable changes to this project will be documented in this file.
   through `WithEndpointURL`, which also parses the path component that vendor
   presets need, and lets the scheme determine TLS rather than the `Insecure` flag.
   Both `http://host:port/path` and bare `host:port` work. Present since v2.0.0.
+- **`WithSpanFilter` and `WithTailSampling` had no effect.** The config merge
+  rebuilt the config from defaults and copied back only a hand-maintained list of
+  fields; neither pipeline field was on it, so both options were silently
+  discarded before the span processors were built. The merge now carries the
+  explicit config wholesale and re-layers only the fields that YAML and
+  environment variables also feed, so a newly added field cannot be dropped, and
+  a reflection-based test fails if one ever is.
 - Corrected the module path to `github.com/jagreehal/autotel-go/v2` and updated
   every internal, example, test, and documentation import. This makes v2
   consumable through Go's semantic import versioning. **v2.0.0 was published
