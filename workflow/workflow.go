@@ -6,7 +6,7 @@
 //
 // Example:
 //
-//	wf := workflow.New("order-fulfillment", ctx)
+//	wf := workflow.New(ctx, "order-fulfillment")
 //
 //	wf.Step("validate", func(ctx context.Context, span trace.Span) error {
 //	    return validateOrder(ctx, order)
@@ -27,7 +27,9 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -112,12 +114,16 @@ func defaultConfig() *Config {
 }
 
 // RetryConfig configures step retry behavior.
+//
+// Between attempts the step sleeps for the computed backoff. The sleep is
+// cancellable: if the context passed to Run is cancelled while waiting, the
+// step fails with the context error rather than continuing to retry.
 type RetryConfig struct {
 	MaxAttempts int     // Maximum number of attempts (1 = no retry)
 	BackoffMs   int64   // Base backoff in milliseconds
 	Multiplier  float64 // Backoff multiplier (for exponential backoff)
 	MaxBackoff  int64   // Maximum backoff in milliseconds
-	Jitter      bool    // Add random jitter to backoff
+	Jitter      bool    // Randomise backoff in [backoff/2, backoff) to avoid thundering herds
 }
 
 // stepDef defines a step before execution.
@@ -214,7 +220,7 @@ func WithDescription(desc string) StepOption {
 //
 // The workflow span is created immediately but steps are deferred until Run().
 // This allows defining all steps before execution begins.
-func New(name string, ctx context.Context, opts ...Option) *Workflow {
+func New(ctx context.Context, name string, opts ...Option) *Workflow {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
@@ -284,10 +290,25 @@ func (w *Workflow) Run(ctx context.Context) error {
 	var failedStep *stepResult
 	var failedErr error
 
+	// Steps run under the workflow span (for parenting) but inherit cancellation
+	// and values from the context passed to Run.
+	stepParent := trace.ContextWithSpan(ctx, w.workflowSpan)
+
 	// Execute steps in order
 	for i, step := range w.steps {
-		result := w.executeStep(ctx, i, step)
+		if err := ctx.Err(); err != nil {
+			failedErr = err
+			w.workflowSpan.AddEvent("workflow.cancelled", trace.WithAttributes(
+				attribute.Int("workflow.steps_executed", i),
+			))
+			break
+		}
+
+		result := w.executeStep(stepParent, i, step)
+
+		w.mu.Lock()
 		w.completedSteps = append(w.completedSteps, result)
+		w.mu.Unlock()
 
 		if result.err != nil {
 			failedStep = result
@@ -303,7 +324,12 @@ func (w *Workflow) Run(ctx context.Context) error {
 
 		w.workflowSpan.SetAttributes(attribute.String("workflow.state", string(StateFailed)))
 		w.workflowSpan.RecordError(failedErr)
-		w.workflowSpan.SetStatus(codes.Error, fmt.Sprintf("step '%s' failed: %s", failedStep.def.name, failedErr))
+		if failedStep != nil {
+			w.workflowSpan.SetStatus(codes.Error, fmt.Sprintf("step '%s' failed: %s", failedStep.def.name, failedErr))
+		} else {
+			// No step failed: the workflow context was cancelled before a step ran.
+			w.workflowSpan.SetStatus(codes.Error, failedErr.Error())
+		}
 
 		// Run compensations if configured
 		if w.config.CompensationMode == CompensateOnFailure {
@@ -373,7 +399,7 @@ func (w *Workflow) executeStep(ctx context.Context, index int, step *stepDef) *s
 	}
 
 	// Create step span as child of workflow span
-	stepCtx, stepSpan := w.tracer.Start(w.workflowContext, fmt.Sprintf("workflow.step.%s", step.name), spanOpts...)
+	stepCtx, stepSpan := w.tracer.Start(ctx, fmt.Sprintf("workflow.step.%s", step.name), spanOpts...)
 	defer stepSpan.End()
 
 	result.spanCtx = stepSpan.SpanContext()
@@ -389,7 +415,7 @@ func (w *Workflow) executeStep(ctx context.Context, index int, step *stepDef) *s
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			// Retry attempt
+			// Retry attempt: wait out the backoff before trying again.
 			backoff := w.calculateBackoff(step.retry, attempt)
 			stepSpan.AddEvent("step.retry_scheduled", trace.WithAttributes(
 				attribute.Int("workflow.step.retry_attempt", attempt),
@@ -397,8 +423,14 @@ func (w *Workflow) executeStep(ctx context.Context, index int, step *stepDef) *s
 				attribute.Int64("workflow.step.backoff_ms", backoff),
 			))
 
-			// Sleep for backoff (in real code, use time.Sleep)
-			// time.Sleep(time.Duration(backoff) * time.Millisecond)
+			if waitErr := sleepContext(stepCtx, time.Duration(backoff)*time.Millisecond); waitErr != nil {
+				stepSpan.AddEvent("step.retry_abandoned", trace.WithAttributes(
+					attribute.Int("workflow.step.retry_attempt", attempt),
+					attribute.String("error.message", waitErr.Error()),
+				))
+				err = waitErr
+				break
+			}
 
 			stepSpan.SetAttributes(attribute.Int("workflow.step.retry_attempt", attempt))
 		}
@@ -435,9 +467,13 @@ func (w *Workflow) executeStep(ctx context.Context, index int, step *stepDef) *s
 func (w *Workflow) buildStepLinks(index int, step *stepDef) []trace.Link {
 	var links []trace.Link
 
+	w.mu.Lock()
+	completed := append([]*stepResult(nil), w.completedSteps...)
+	w.mu.Unlock()
+
 	// Link to previous step
-	if step.linkToPrevious && index > 0 {
-		prevResult := w.completedSteps[index-1]
+	if step.linkToPrevious && index > 0 && index-1 < len(completed) {
+		prevResult := completed[index-1]
 		if prevResult.spanCtx.IsValid() {
 			links = append(links, trace.Link{
 				SpanContext: prevResult.spanCtx,
@@ -451,7 +487,7 @@ func (w *Workflow) buildStepLinks(index int, step *stepDef) []trace.Link {
 
 	// Link to specific steps by name
 	for _, stepName := range step.linkTo {
-		for _, completed := range w.completedSteps {
+		for _, completed := range completed {
 			if completed.def.name == stepName && completed.spanCtx.IsValid() {
 				links = append(links, trace.Link{
 					SpanContext: completed.spanCtx,
@@ -468,9 +504,9 @@ func (w *Workflow) buildStepLinks(index int, step *stepDef) []trace.Link {
 	return links
 }
 
-// calculateBackoff computes the backoff duration for a retry attempt.
+// calculateBackoff computes the backoff duration in milliseconds for a retry attempt.
 func (w *Workflow) calculateBackoff(config *RetryConfig, attempt int) int64 {
-	if config == nil || config.BackoffMs == 0 {
+	if config == nil || config.BackoffMs <= 0 {
 		return 0
 	}
 
@@ -480,6 +516,9 @@ func (w *Workflow) calculateBackoff(config *RetryConfig, attempt int) int64 {
 	if config.Multiplier > 1.0 {
 		for i := 1; i < attempt; i++ {
 			backoff = int64(float64(backoff) * config.Multiplier)
+			if config.MaxBackoff > 0 && backoff >= config.MaxBackoff {
+				break // stop early; also guards against overflow on long retry chains
+			}
 		}
 	}
 
@@ -488,28 +527,57 @@ func (w *Workflow) calculateBackoff(config *RetryConfig, attempt int) int64 {
 		backoff = config.MaxBackoff
 	}
 
-	// Note: Jitter would require math/rand, skipping for simplicity
-	// In production, add random jitter: backoff = backoff + rand.Int63n(backoff/4)
+	// Equal jitter: spread retries over [backoff/2, backoff) so that many workflows
+	// failing at once do not retry in lockstep.
+	if config.Jitter && backoff > 1 {
+		half := backoff / 2
+		backoff = half + rand.Int64N(backoff-half)
+	}
 
 	return backoff
 }
 
+// sleepContext waits for d, returning early with the context error if ctx is done.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // compensate runs compensation handlers in reverse order.
+//
+// Compensation deliberately runs on a context detached from cancellation: a
+// workflow is most likely to need rollback precisely when its context has been
+// cancelled or timed out, and a cancelled compensation leaves state half-applied.
+// Deadlines for individual compensations are the handler's responsibility.
 func (w *Workflow) compensate(ctx context.Context) error {
+	ctx = trace.ContextWithSpan(context.WithoutCancel(ctx), w.workflowSpan)
+
 	w.mu.Lock()
 	w.state = StateCompensating
+	completed := append([]*stepResult(nil), w.completedSteps...)
 	w.mu.Unlock()
 
 	w.workflowSpan.SetAttributes(attribute.String("workflow.state", string(StateCompensating)))
 	w.workflowSpan.AddEvent("workflow.compensating", trace.WithAttributes(
-		attribute.Int("workflow.steps_to_compensate", len(w.completedSteps)),
+		attribute.Int("workflow.steps_to_compensate", len(completed)),
 	))
 
 	var compensationErrors []error
 
 	// Run compensations in reverse order (skip the failed step)
-	for i := len(w.completedSteps) - 1; i >= 0; i-- {
-		result := w.completedSteps[i]
+	for i := len(completed) - 1; i >= 0; i-- {
+		result := completed[i]
 
 		// Skip if step wasn't successfully executed or has no compensation
 		if result.err != nil || result.def.compensation == nil {
@@ -556,7 +624,7 @@ func (w *Workflow) executeCompensation(ctx context.Context, index int, result *s
 		},
 	}
 
-	compCtx, compSpan := w.tracer.Start(w.workflowContext, fmt.Sprintf("workflow.compensate.%s", result.def.name),
+	compCtx, compSpan := w.tracer.Start(ctx, fmt.Sprintf("workflow.compensate.%s", result.def.name),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(attrs...),
 		trace.WithLinks(link),

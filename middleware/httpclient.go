@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -268,42 +271,86 @@ func NewHTTPTransport(base http.RoundTripper, opts ...HTTPClientOption) *TracedT
 }
 
 // RoundTrip implements http.RoundTripper with trace context propagation.
+//
+// Per the http.RoundTripper contract the incoming request is never modified:
+// headers are injected into a clone, so retries and redirects that reuse the
+// original request are unaffected.
 func (t *TracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 
-	// Always inject trace context headers
-	t.propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
-
 	if t.disableSpans {
-		return t.base.RoundTrip(req)
+		outbound := req.Clone(ctx)
+		t.propagator.Inject(ctx, propagation.HeaderCarrier(outbound.Header))
+		return t.base.RoundTrip(outbound)
 	}
 
 	// Create a span for this outbound request
 	tracer := otel.Tracer("autotel/httpclient")
 	spanName := t.spanNameFormatter(req)
-	ctx, span := tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient))
+	ctx, span := tracer.Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(requestAttributes(req)...),
+	)
 	defer span.End()
 
-	// Update request with new context (for nested tracing)
-	req = req.WithContext(ctx)
-
-	// Re-inject with the new span context
-	t.propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+	// Clone onto the span context so the injected headers carry this span.
+	outbound := req.Clone(ctx)
+	t.propagator.Inject(ctx, propagation.HeaderCarrier(outbound.Header))
 
 	// Execute the request
-	resp, err := t.base.RoundTrip(req)
+	resp, err := t.base.RoundTrip(outbound)
 
 	// Record response status
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-	} else if t.recordStatus && resp != nil {
+		return resp, err
+	}
+
+	if t.recordStatus && resp != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(resp.StatusCode))
 		if resp.StatusCode >= 400 {
 			span.SetStatus(codes.Error, http.StatusText(resp.StatusCode))
 		}
 	}
 
 	return resp, err
+}
+
+// requestAttributes returns the OTel semantic-convention attributes for an
+// outbound client request. The URL is recorded without user info or query
+// string, which routinely carry credentials and tokens.
+func requestAttributes(req *http.Request) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		semconv.HTTPRequestMethodKey.String(req.Method),
+	}
+
+	if req.URL == nil {
+		return attrs
+	}
+
+	redacted := *req.URL
+	redacted.User = nil
+	redacted.RawQuery = ""
+	redacted.Fragment = ""
+	attrs = append(attrs, semconv.URLFull(redacted.String()))
+
+	if req.URL.Path != "" {
+		attrs = append(attrs, semconv.URLPath(req.URL.Path))
+	}
+	if req.URL.Scheme != "" {
+		attrs = append(attrs, semconv.URLScheme(req.URL.Scheme))
+	}
+	if host := req.URL.Hostname(); host != "" {
+		attrs = append(attrs, semconv.ServerAddress(host))
+	}
+	if portStr := req.URL.Port(); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			attrs = append(attrs, semconv.ServerPort(port))
+		}
+	}
+
+	return attrs
 }
 
 // InjectHeaders injects W3C trace context headers into an HTTP request.

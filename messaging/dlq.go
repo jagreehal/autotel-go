@@ -2,12 +2,12 @@ package messaging
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // DLQReason represents the category of DLQ routing reason.
@@ -115,24 +115,13 @@ func RecordDLQ(ctx context.Context, info DLQInfo) {
 		attrs = append(attrs, attribute.Int64("messaging.dlq.original_offset", info.OriginalOffset))
 	}
 
-	span.SetAttributes(attrs...)
-
-	// Create link to producer span if headers are available
-	if info.ProducerHeaders != nil {
-		if link, ok := sampling.CreateLinkFromHeaders(info.ProducerHeaders); ok {
-			// Add link attributes
-			link.Attributes = append(link.Attributes,
-				attribute.String("link.type", "dlq_producer"),
-				attribute.String("messaging.dlq.queue", info.QueueName),
-			)
-			// Note: Links must be added at span creation time in OTel Go.
-			// Record the producer trace info as attributes instead.
-			if traceID := info.ProducerHeaders["traceparent"]; traceID != "" {
-				attrs = append(attrs, attribute.String("messaging.dlq.producer_traceparent", traceID))
-			}
-		}
+	// Links can only be attached at span creation time in OTel Go, so the
+	// producer's trace context is recorded as an attribute instead.
+	if traceparent := info.ProducerHeaders["traceparent"]; traceparent != "" {
+		attrs = append(attrs, attribute.String("messaging.dlq.producer_traceparent", traceparent))
 	}
 
+	span.SetAttributes(attrs...)
 	span.AddEvent("message.sent_to_dlq", trace.WithAttributes(attrs...))
 }
 
@@ -283,34 +272,64 @@ type DLQHandler func(ctx context.Context, msg Message, err error, retryCount int
 //	    messaging.WithDestination("orders"),
 //	    messaging.OnError(messaging.NewDLQErrorHandler(3, "orders-dlq", sendToDLQ)),
 //	)
+//
+// The handler cannot observe successful deliveries, so entries for messages that
+// fail once and then succeed are never explicitly cleared. The counter map is
+// bounded and evicts oldest-first to keep memory flat on long-running consumers.
+const dlqRetryTrackerMaxEntries = 10000
+
 func NewDLQErrorHandler(maxRetries int, dlqName string, dlqSender func(ctx context.Context, msg Message) error) func(ctx context.Context, msg Message, err error) {
-	retryTracker := make(map[string]int) // Simple in-memory tracker
+	var (
+		mu       sync.Mutex
+		counts   = make(map[string]int)
+		inserted []string // insertion order, for bounded FIFO eviction
+	)
 
 	return func(ctx context.Context, msg Message, err error) {
 		msgID := msg.ID()
-		retryTracker[msgID]++
-		count := retryTracker[msgID]
+
+		mu.Lock()
+		if _, seen := counts[msgID]; !seen {
+			if len(inserted) >= dlqRetryTrackerMaxEntries {
+				delete(counts, inserted[0])
+				inserted = inserted[1:]
+			}
+			inserted = append(inserted, msgID)
+		}
+		counts[msgID]++
+		count := counts[msgID]
+		exhausted := count >= maxRetries
+		if exhausted {
+			delete(counts, msgID)
+			for i, id := range inserted {
+				if id == msgID {
+					inserted = append(inserted[:i], inserted[i+1:]...)
+					break
+				}
+			}
+		}
+		mu.Unlock()
 
 		RecordRetry(ctx, RetryInfo{
 			Count:  count,
 			Reason: err.Error(),
 		})
 
-		if count >= maxRetries {
-			RecordDLQ(ctx, DLQInfo{
-				QueueName:         dlqName,
-				Reason:            "max_retries_exceeded",
-				ReasonCategory:    DLQReasonMaxRetries,
-				OriginalMessageID: msgID,
-				RetryCount:        count,
-				ProducerHeaders:   msg.Headers(),
-			})
+		if !exhausted {
+			return
+		}
 
-			if dlqSender != nil {
-				_ = dlqSender(ctx, msg)
-			}
+		RecordDLQ(ctx, DLQInfo{
+			QueueName:         dlqName,
+			Reason:            "max_retries_exceeded",
+			ReasonCategory:    DLQReasonMaxRetries,
+			OriginalMessageID: msgID,
+			RetryCount:        count,
+			ProducerHeaders:   msg.Headers(),
+		})
 
-			delete(retryTracker, msgID) // Clean up
+		if dlqSender != nil {
+			_ = dlqSender(ctx, msg)
 		}
 	}
 }
@@ -405,34 +424,11 @@ func ClassifyDLQReason(err error) DLQReasonCategory {
 
 // contains checks if s contains any of the substrings (case-insensitive).
 func contains(s string, substrings ...string) bool {
-	lower := toLower(s)
+	lower := strings.ToLower(s)
 	for _, sub := range substrings {
-		if indexOf(lower, toLower(sub)) >= 0 {
+		if strings.Contains(lower, strings.ToLower(sub)) {
 			return true
 		}
 	}
 	return false
-}
-
-// Simple toLower without strings package dependency
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
-	}
-	return string(b)
-}
-
-// Simple indexOf without strings package dependency
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

@@ -24,10 +24,10 @@ func TestTrackerCalculatesSLIAndErrorBudgetBurnRate(t *testing.T) {
 	require.NoError(t, err)
 
 	for range 99 {
-		_, err = tracker.Record(slo.OutcomeGood)
+		_, err = tracker.Record(context.Background(), slo.OutcomeGood)
 		require.NoError(t, err)
 	}
-	snapshot, err := tracker.Record(slo.OutcomeBad)
+	snapshot, err := tracker.Record(context.Background(), slo.OutcomeBad)
 	require.NoError(t, err)
 
 	require.Equal(t, int64(100), snapshot.Total)
@@ -40,7 +40,7 @@ func TestTrackerCalculatesSLIAndErrorBudgetBurnRate(t *testing.T) {
 	require.True(t, snapshot.MeetsTarget)
 
 	now = now.Add(time.Millisecond)
-	snapshot, err = tracker.Record(slo.OutcomeBad)
+	snapshot, err = tracker.Record(context.Background(), slo.OutcomeBad)
 	require.NoError(t, err)
 	require.Greater(t, snapshot.BurnRate, 1.0)
 }
@@ -77,7 +77,7 @@ func TestTrackerDropsObservationsOutsideRollingWindow(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = tracker.Record(slo.OutcomeBad)
+	_, err = tracker.Record(context.Background(), slo.OutcomeBad)
 	require.NoError(t, err)
 	now = now.Add(time.Second + time.Nanosecond)
 
@@ -96,9 +96,9 @@ func TestTrackerResetClearsAllObservations(t *testing.T) {
 		slo.WithMetrics(false),
 	)
 	require.NoError(t, err)
-	_, err = tracker.Record(slo.OutcomeGood)
+	_, err = tracker.Record(context.Background(), slo.OutcomeGood)
 	require.NoError(t, err)
-	_, err = tracker.Record(slo.OutcomeBad)
+	_, err = tracker.Record(context.Background(), slo.OutcomeBad)
 	require.NoError(t, err)
 
 	tracker.Reset()
@@ -177,16 +177,16 @@ func TestTrackerForecastsErrorBudgetExhaustion(t *testing.T) {
 	require.NoError(t, err)
 
 	for range 9_950 {
-		_, err = tracker.Record(slo.OutcomeGood)
+		_, err = tracker.Record(context.Background(), slo.OutcomeGood)
 		require.NoError(t, err)
 	}
 	now = now.Add(29 * 24 * time.Hour)
 	for range 25 {
-		_, err = tracker.Record(slo.OutcomeGood)
+		_, err = tracker.Record(context.Background(), slo.OutcomeGood)
 		require.NoError(t, err)
 	}
 	for range 25 {
-		_, err = tracker.Record(slo.OutcomeBad)
+		_, err = tracker.Record(context.Background(), slo.OutcomeBad)
 		require.NoError(t, err)
 	}
 
@@ -250,11 +250,11 @@ func TestForecastMatchesChapterTwelveWorkedScenarios(t *testing.T) {
 			for daysAgo := len(test.buckets) - 1; daysAgo >= 0; daysAgo-- {
 				total, failures := test.buckets[daysAgo][0], test.buckets[daysAgo][1]
 				for range total - failures {
-					_, err = tracker.Record(slo.OutcomeGood)
+					_, err = tracker.Record(context.Background(), slo.OutcomeGood)
 					require.NoError(t, err)
 				}
 				for range failures {
-					_, err = tracker.Record(slo.OutcomeBad)
+					_, err = tracker.Record(context.Background(), slo.OutcomeBad)
 					require.NoError(t, err)
 				}
 				clock = clock.AddDate(0, 0, 1)
@@ -285,7 +285,7 @@ func TestTrackerRecordsLowCardinalityMetrics(t *testing.T) {
 		slo.WithMeter(provider.Meter("slo-test")),
 	)
 	require.NoError(t, err)
-	_, err = tracker.Record(slo.OutcomeBad)
+	_, err = tracker.Record(context.Background(), slo.OutcomeBad)
 	require.NoError(t, err)
 
 	var resourceMetrics metricdata.ResourceMetrics
@@ -307,7 +307,7 @@ func TestTrackerRejectsInvalidOutcomeWithoutChangingSnapshot(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = tracker.Record(slo.Outcome("unknown"))
+	_, err = tracker.Record(context.Background(), slo.Outcome("unknown"))
 
 	require.ErrorContains(t, err, "outcome")
 	require.Zero(t, tracker.Snapshot().Total)
@@ -399,7 +399,7 @@ func TestTrackerRecordsConcurrentOutcomes(t *testing.T) {
 	errors := make(chan error, 100)
 	for range 100 {
 		go func() {
-			_, recordErr := tracker.Record(slo.OutcomeGood)
+			_, recordErr := tracker.Record(context.Background(), slo.OutcomeGood)
 			errors <- recordErr
 		}()
 	}

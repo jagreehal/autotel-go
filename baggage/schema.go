@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.opentelemetry.io/otel/baggage"
 )
@@ -23,18 +24,34 @@ const (
 )
 
 // FieldConstraint defines validation constraints for a field.
+//
+// MinValue and MaxValue are pointers so that a bound of 0 is enforceable and
+// distinguishable from "no bound set". Use Bound to set them.
 type FieldConstraint struct {
 	Type        FieldType
 	Required    bool
 	MaxLength   int      // For strings
-	MinValue    float64  // For numbers
-	MaxValue    float64  // For numbers
+	MinValue    *float64 // For numbers; nil means no lower bound
+	MaxValue    *float64 // For numbers; nil means no upper bound
 	EnumValues  []string // For enums
 	Pattern     string   // Regex pattern for strings
 	HashValue   bool     // Hash the value for PII protection
 	RedactPII   bool     // Auto-detect and redact PII
 	Description string   // Documentation
+
+	compiledPattern *regexp.Regexp // compiled once at DefineField
 }
+
+// Bound returns a pointer to v, for use with FieldConstraint.MinValue/MaxValue.
+//
+// Example:
+//
+//	schema.DefineField("discount", baggage.FieldConstraint{
+//	    Type:     baggage.FieldTypeNumber,
+//	    MinValue: baggage.Bound(0),
+//	    MaxValue: baggage.Bound(100),
+//	})
+func Bound(v float64) *float64 { return &v }
 
 // PIIPattern represents a pattern for detecting PII.
 type PIIPattern struct {
@@ -137,7 +154,13 @@ func NewSchema(opts ...SchemaOption) *Schema {
 //	    Type:      baggage.FieldTypeString,
 //	    HashValue: true, // Hash for privacy
 //	})
+//
+// An invalid Pattern is rejected at definition time rather than silently failing
+// on every Validate call.
 func (s *Schema) DefineField(name string, constraint FieldConstraint) *Schema {
+	if constraint.Pattern != "" {
+		constraint.compiledPattern = regexp.MustCompile(constraint.Pattern)
+	}
 	s.fields[name] = &constraint
 	return s
 }
@@ -167,12 +190,13 @@ func (s *Schema) DefineEnumField(name string, values []string) *Schema {
 	})
 }
 
-// DefineNumberField is a convenience method for defining a number field.
+// DefineNumberField is a convenience method for defining a number field with
+// an inclusive [min, max] range. Both bounds are enforced, including 0.
 func (s *Schema) DefineNumberField(name string, min, max float64) *Schema {
 	return s.DefineField(name, FieldConstraint{
 		Type:     FieldTypeNumber,
-		MinValue: min,
-		MaxValue: max,
+		MinValue: Bound(min),
+		MaxValue: Bound(max),
 	})
 }
 
@@ -242,14 +266,8 @@ func (s *Schema) validateString(field, value string, c *FieldConstraint) error {
 		}
 	}
 
-	if c.Pattern != "" {
-		matched, err := regexp.MatchString(c.Pattern, value)
-		if err != nil {
-			return &ValidationError{Field: field, Value: value, Message: "invalid pattern"}
-		}
-		if !matched {
-			return &ValidationError{Field: field, Value: value, Message: "value does not match pattern"}
-		}
+	if c.compiledPattern != nil && !c.compiledPattern.MatchString(value) {
+		return &ValidationError{Field: field, Value: value, Message: "value does not match pattern"}
 	}
 
 	return nil
@@ -261,19 +279,19 @@ func (s *Schema) validateNumber(field, value string, c *FieldConstraint) error {
 		return &ValidationError{Field: field, Value: value, Message: "not a valid number"}
 	}
 
-	if c.MinValue != 0 && num < c.MinValue {
+	if c.MinValue != nil && num < *c.MinValue {
 		return &ValidationError{
 			Field:   field,
 			Value:   value,
-			Message: fmt.Sprintf("value below minimum of %f", c.MinValue),
+			Message: fmt.Sprintf("value below minimum of %g", *c.MinValue),
 		}
 	}
 
-	if c.MaxValue != 0 && num > c.MaxValue {
+	if c.MaxValue != nil && num > *c.MaxValue {
 		return &ValidationError{
 			Field:   field,
 			Value:   value,
-			Message: fmt.Sprintf("value above maximum of %f", c.MaxValue),
+			Message: fmt.Sprintf("value above maximum of %g", *c.MaxValue),
 		}
 	}
 
@@ -360,10 +378,15 @@ func (s *Schema) DetectPII(value string) []string {
 }
 
 // SafeBaggage wraps baggage operations with schema validation.
+//
+// A SafeBaggage is safe for concurrent use and is designed to be shared across
+// requests: cardinality tracking is deliberately process-wide, since its purpose
+// is to catch a field whose value space grows without bound.
 type SafeBaggage struct {
-	schema     *Schema
+	schema *Schema
+
+	mu         sync.Mutex
 	seenValues map[string]map[string]bool // Per-field value tracking for cardinality
-	totalSize  int
 }
 
 // NewSafeBaggage creates a new safe baggage wrapper.
@@ -387,29 +410,20 @@ func (sb *SafeBaggage) Set(ctx context.Context, field, value string) (context.Co
 
 	// Check cardinality
 	if limit, ok := sb.schema.cardinalityLimit[field]; ok {
-		if sb.seenValues[field] == nil {
-			sb.seenValues[field] = make(map[string]bool)
-		}
-		sb.seenValues[field][processed] = true
-		if len(sb.seenValues[field]) > limit {
-			return ctx, &ValidationError{
-				Field:   field,
-				Value:   processed,
-				Message: fmt.Sprintf("cardinality limit of %d exceeded", limit),
-			}
+		if err := sb.trackCardinality(field, processed, limit); err != nil {
+			return ctx, err
 		}
 	}
 
-	// Check total size
-	newSize := sb.totalSize + len(field) + len(processed) + 2 // +2 for = and separator
-	if newSize > sb.schema.maxTotalSize {
+	// Check total size against the baggage actually carried by this context.
+	// Size is a property of the context, not of this SafeBaggage instance.
+	if size := baggageSize(ctx) + len(field) + len(processed) + 2; size > sb.schema.maxTotalSize {
 		return ctx, &ValidationError{
 			Field:   field,
 			Value:   processed,
 			Message: fmt.Sprintf("total baggage size would exceed limit of %d bytes", sb.schema.maxTotalSize),
 		}
 	}
-	sb.totalSize = newSize
 
 	member, err := baggage.NewMember(field, processed)
 	if err != nil {
@@ -423,6 +437,36 @@ func (sb *SafeBaggage) Set(ctx context.Context, field, value string) (context.Co
 	}
 
 	return baggage.ContextWithBaggage(ctx, bag), nil
+}
+
+// trackCardinality records a distinct value for a field and reports when the
+// field's value space exceeds its configured limit.
+func (sb *SafeBaggage) trackCardinality(field, value string, limit int) error {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	if sb.seenValues[field] == nil {
+		sb.seenValues[field] = make(map[string]bool)
+	}
+	if !sb.seenValues[field][value] && len(sb.seenValues[field]) >= limit {
+		return &ValidationError{
+			Field:   field,
+			Value:   value,
+			Message: fmt.Sprintf("cardinality limit of %d exceeded", limit),
+		}
+	}
+	sb.seenValues[field][value] = true
+
+	return nil
+}
+
+// baggageSize returns the encoded size of the baggage carried by ctx.
+func baggageSize(ctx context.Context) int {
+	size := 0
+	for _, member := range baggage.FromContext(ctx).Members() {
+		size += len(member.Key()) + len(member.Value()) + 2 // +2 for = and separator
+	}
+	return size
 }
 
 // SetMultiple validates and sets multiple baggage values.

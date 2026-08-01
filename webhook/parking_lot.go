@@ -30,11 +30,11 @@
 //	    orderID := event.Data.Object.Metadata["order_id"]
 //
 //	    // Retrieve parked context and create linked span
-//	    ctx, span, err := lot.RetrieveAndTrace(ctx, "payment:"+orderID, "stripe.webhook.payment_intent.succeeded")
-//	    if err != nil {
-//	        // Context not found - log but continue
-//	    }
+//	    ctx, span, parked := lot.RetrieveAndTrace(ctx, "payment:"+orderID, "stripe.webhook.payment_intent.succeeded")
 //	    defer span.End()
+//	    if parked == nil {
+//	        // Context not found or expired - the span is still valid, just unlinked
+//	    }
 //
 //	    return fulfillOrder(ctx, orderID)
 //	}
@@ -98,6 +98,7 @@ type InMemoryStore struct {
 	data            map[string]*StoredContext
 	cleanupInterval time.Duration
 	stopCleanup     chan struct{}
+	stopOnce        sync.Once
 }
 
 // InMemoryStoreOption configures the in-memory store.
@@ -201,9 +202,9 @@ func (s *InMemoryStore) Exists(ctx context.Context, key string) (bool, error) {
 	return !sc.IsExpired(), nil
 }
 
-// Close stops the cleanup goroutine.
+// Close stops the cleanup goroutine. It is safe to call more than once.
 func (s *InMemoryStore) Close() {
-	close(s.stopCleanup)
+	s.stopOnce.Do(func() { close(s.stopCleanup) })
 }
 
 // Size returns the number of stored contexts (for testing).
@@ -402,14 +403,19 @@ func (p *ParkingLot) Retrieve(ctx context.Context, correlationKey string) (*Stor
 
 // RetrieveAndTrace retrieves parked context and creates a linked span.
 // This is the primary method for handling callbacks.
-// Returns the stored context (may be nil if not found), the new span, and any error.
+//
+// It always returns a usable context and span, so the caller can defer span.End()
+// unconditionally. The third return is the parked context, or nil when nothing was
+// found, it had expired, or the store failed; a store failure is recorded on the
+// span as parking_lot.error rather than returned, so a callback is never dropped
+// just because the parking-lot backend is unavailable.
 //
 // Example:
 //
-//	ctx, span, _ := lot.RetrieveAndTrace(ctx, "payment:order-123", "stripe.webhook.payment_succeeded")
+//	ctx, span, parked := lot.RetrieveAndTrace(ctx, "payment:order-123", "stripe.webhook.payment_succeeded")
 //	defer span.End()
 func (p *ParkingLot) RetrieveAndTrace(ctx context.Context, correlationKey string, spanName string) (context.Context, trace.Span, *StoredContext) {
-	sc, _ := p.Retrieve(ctx, correlationKey)
+	sc, retrieveErr := p.Retrieve(ctx, correlationKey)
 
 	tracer := otel.Tracer(p.tracerName)
 
@@ -447,6 +453,10 @@ func (p *ParkingLot) RetrieveAndTrace(ctx context.Context, correlationKey string
 		))
 	} else {
 		span.SetAttributes(attribute.Bool("parking_lot.context_found", false))
+		if retrieveErr != nil {
+			span.SetAttributes(attribute.String("parking_lot.error", retrieveErr.Error()))
+			span.RecordError(retrieveErr)
+		}
 	}
 
 	return ctx, span, sc

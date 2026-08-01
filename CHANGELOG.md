@@ -10,14 +10,67 @@ All notable changes to this project will be documented in this file.
 
 - Corrected the module path to `github.com/jagreehal/autotel-go/v2` and updated
   every internal, example, test, and documentation import. This makes v2
-  consumable through Go's semantic import versioning.
+  consumable through Go's semantic import versioning. **v2.0.0 was published
+  without the `/v2` suffix and cannot be resolved by `go get`; upgrade to 2.1.0.**
+- `workflow.WithRetry` now actually waits between attempts. The backoff was
+  computed and reported on the span but never slept, so a configured retry
+  hammered the failing dependency with no delay. The wait is cancellable via the
+  context passed to `Run`, and `RetryConfig.Jitter` is now honoured.
+- `messaging` consumer-group partition numbers are formatted as decimal. They
+  were encoded as `string(rune('0'+n))`, so partition 10 reached the backend as
+  `":"`, 17 as `"A"` and 200 as `"ø"`.
+- `messaging.RecordPartitionLag` records the topic and partition as attribute
+  *values*. They were interpolated into the attribute *key*, producing unbounded
+  attribute-key cardinality.
+- `messaging.NewDLQErrorHandler`'s retry counter is mutex-guarded and bounded. It
+  was an unsynchronised map mutated from concurrent consumer callbacks, which
+  panics with "concurrent map writes", and it grew without limit.
+- `baggage.SafeBaggage` size accounting is per-context rather than a per-instance
+  running total, so a long-lived instance no longer starts rejecting every write.
+  Cardinality tracking is mutex-guarded.
+- `baggage` number fields enforce a bound of `0`. `MinValue`/`MaxValue` are now
+  `*float64`; a zero bound was previously indistinguishable from "unset" and
+  silently skipped.
+- `messaging.BatchProcessor.ProcessEach` returns the joined per-message errors.
+  It previously always returned `nil`, so callers could not detect failures.
+- `middleware`'s traced `RoundTripper` injects headers into a clone instead of
+  mutating the caller's request, per the `http.RoundTripper` contract.
+- `webhook.ParkingLot.RetrieveAndTrace`'s documented example did not compile and
+  described an error return the method never had. Store failures are now recorded
+  on the span as `parking_lot.error` instead of being silently discarded.
+- `messaging.ClassifyDLQReason` uses `strings` instead of a hand-rolled ASCII-only
+  `toLower`, so it no longer misclassifies non-ASCII error text.
 
 ### Changed
 
 - Raised the minimum supported Go version from 1.23 to 1.25 and selected the
   patched Go 1.26.5 toolchain for release builds.
 - Updated Gin, OpenTelemetry, gRPC, Zap, protobuf, and transitive dependencies.
-- Updated CI to test Go 1.25 and 1.26 and current GitHub Action releases.
+- Updated CI to test Go 1.25 and 1.26 and current GitHub Action releases. Lint now
+  runs once on the go.mod toolchain against a pinned golangci-lint, and
+  `govulncheck` gates the build.
+- Outbound HTTP client spans now carry OTel semantic-convention attributes
+  (`http.request.method`, `url.full`, `url.path`, `url.scheme`, `server.address`,
+  `server.port`, `http.response.status_code`). `url.full` excludes the query
+  string and user info, which routinely carry credentials.
+- `workflow.New` takes the context first: `New(ctx, name, opts...)`.
+- `workflow` compensation runs on a context detached from cancellation, so a saga
+  still rolls back when the workflow context is cancelled or times out.
+- `slo.Tracker.Record` takes a `context.Context` so metric exemplars link back to
+  the originating span.
+- `slo.Snapshot.BudgetConsumed` was removed; it always held the same value as
+  `BurnRate`.
+
+### Removed
+
+- `WithSpanNameNormalizer`, `WithAttributeRedactor`, and the
+  `processors.SpanNameNormalizingProcessor` / `processors.AttributeRedactingProcessor`
+  types. Both processors forwarded spans unchanged — span data is read-only at
+  `OnEnd` in the Go SDK — so the options silently did nothing while appearing to
+  redact or rewrite. Use `WithPIIRedaction` for attribute redaction. These will
+  return if and when they can be implemented at the exporter level.
+- The internal `parity.md` and `FEATURE_PARITY_REPORT.md` working documents,
+  which referenced local developer paths and claimed tests that did not exist.
 
 ### Added
 
@@ -32,10 +85,9 @@ All notable changes to this project will be documented in this file.
   client/server spans, operation metrics, and error handling.
 - **Correlation IDs** (`correlationid/`): generation, context and baggage
   propagation, trace fallback, and scoped execution helpers.
-- **Span processors** (`processors/`): filtering, tail-sampling decisions,
-  attribute-redaction hooks, and span-name normalization hooks.
+- **Span processors** (`processors/`): span filtering and tail-sampling decisions.
 - **HTTP client instrumentation** (`middleware/httpclient.go`) with automatic
-  trace propagation and configurable request/response attributes.
+  trace propagation and semantic-convention request/response attributes.
 - **Service-to-service example** demonstrating inbound and outbound trace
   propagation.
 

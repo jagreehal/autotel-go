@@ -2,6 +2,8 @@ package messaging
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +59,10 @@ type ConsumerGroupState struct {
 }
 
 // ConsumerGroupTracker tracks consumer group state and records events.
+// It is safe for concurrent use: rebalance and heartbeat callbacks are
+// typically invoked from the client library's own goroutines.
 type ConsumerGroupTracker struct {
+	mu                   sync.RWMutex
 	state                *ConsumerGroupState
 	onRebalance          func(event RebalanceEvent)
 	onPartitionsAssigned func(partitions []PartitionAssignment)
@@ -127,6 +132,9 @@ func NewConsumerGroupTracker(opts ...ConsumerGroupTrackerOption) *ConsumerGroupT
 
 // State returns a copy of the current consumer group state.
 func (t *ConsumerGroupTracker) State() ConsumerGroupState {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
 	return ConsumerGroupState{
 		GroupID:            t.state.GroupID,
 		MemberID:           t.state.MemberID,
@@ -151,20 +159,23 @@ func (t *ConsumerGroupTracker) State() ConsumerGroupState {
 //	    MemberID:   "consumer-1",
 //	})
 func (t *ConsumerGroupTracker) RecordRebalance(ctx context.Context, event RebalanceEvent) {
-	// Update internal state
+	t.mu.Lock()
 	t.updateState(event)
+	state := t.state.State
+	t.mu.Unlock()
 
 	// Record to span
 	span := trace.SpanFromContext(ctx)
 	if span.IsRecording() {
-		t.recordRebalanceToSpan(span, event)
+		t.recordRebalanceToSpan(span, event, state)
 	}
 
-	// Call user callbacks
+	// Call user callbacks outside the lock: they may call back into the tracker.
 	t.invokeCallbacks(event)
 }
 
 // updateState updates internal tracker state based on rebalance event.
+// Callers must hold t.mu.
 func (t *ConsumerGroupTracker) updateState(event RebalanceEvent) {
 	switch event.Type {
 	case RebalanceAssigned:
@@ -193,6 +204,7 @@ func (t *ConsumerGroupTracker) updateState(event RebalanceEvent) {
 }
 
 // removePartitions removes the given partitions from the assigned set.
+// Callers must hold t.mu.
 func (t *ConsumerGroupTracker) removePartitions(toRemove []PartitionAssignment) []PartitionAssignment {
 	removeSet := make(map[string]bool)
 	for _, p := range toRemove {
@@ -209,7 +221,8 @@ func (t *ConsumerGroupTracker) removePartitions(toRemove []PartitionAssignment) 
 }
 
 // recordRebalanceToSpan records rebalance event attributes and events to the span.
-func (t *ConsumerGroupTracker) recordRebalanceToSpan(span trace.Span, event RebalanceEvent) {
+// state is read by the caller under t.mu so this runs lock-free.
+func (t *ConsumerGroupTracker) recordRebalanceToSpan(span trace.Span, event RebalanceEvent, state string) {
 	// Base attributes
 	span.SetAttributes(
 		attribute.String("messaging.consumer_group.rebalance.type", string(event.Type)),
@@ -226,8 +239,8 @@ func (t *ConsumerGroupTracker) recordRebalanceToSpan(span trace.Span, event Reba
 	if event.Reason != "" {
 		span.SetAttributes(attribute.String("messaging.consumer_group.rebalance.reason", event.Reason))
 	}
-	if t.state.State != "" {
-		span.SetAttributes(attribute.String("messaging.consumer_group.state", t.state.State))
+	if state != "" {
+		span.SetAttributes(attribute.String("messaging.consumer_group.state", state))
 	}
 
 	// Partition details (if small enough)
@@ -271,7 +284,11 @@ func (t *ConsumerGroupTracker) invokeCallbacks(event RebalanceEvent) {
 //	tracker.RecordHeartbeat(ctx, true, 5*time.Millisecond)
 func (t *ConsumerGroupTracker) RecordHeartbeat(ctx context.Context, healthy bool, latency time.Duration) {
 	span := trace.SpanFromContext(ctx)
+
+	t.mu.Lock()
 	t.state.LastHeartbeat = time.Now()
+	heartbeatAt := t.state.LastHeartbeat
+	t.mu.Unlock()
 
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("messaging.consumer_group.heartbeat.healthy", healthy))
@@ -282,7 +299,7 @@ func (t *ConsumerGroupTracker) RecordHeartbeat(ctx context.Context, healthy bool
 
 		eventAttrs := []attribute.KeyValue{
 			attribute.Bool("messaging.consumer_group.heartbeat.healthy", healthy),
-			attribute.Int64("messaging.consumer_group.heartbeat.timestamp", t.state.LastHeartbeat.UnixMilli()),
+			attribute.Int64("messaging.consumer_group.heartbeat.timestamp", heartbeatAt.UnixMilli()),
 		}
 		if latency > 0 {
 			eventAttrs = append(eventAttrs, attribute.Int64("messaging.consumer_group.heartbeat.latency_ms", latency.Milliseconds()))
@@ -308,12 +325,14 @@ func (t *ConsumerGroupTracker) RecordPartitionLag(ctx context.Context, lag Parti
 	span := trace.SpanFromContext(ctx)
 
 	if span.IsRecording() {
-		prefix := "messaging.consumer_group.lag." + lag.Topic + "." + string(rune('0'+lag.Partition))
-
+		// Topic and partition are attribute values, never part of the key: encoding
+		// them into the key explodes attribute-key cardinality on every backend.
 		span.SetAttributes(
-			attribute.Int64(prefix+".current_offset", lag.CurrentOffset),
-			attribute.Int64(prefix+".end_offset", lag.EndOffset),
-			attribute.Int64(prefix+".lag", lag.Lag),
+			attribute.String("messaging.consumer_group.lag.topic", lag.Topic),
+			attribute.Int("messaging.consumer_group.lag.partition", lag.Partition),
+			attribute.Int64("messaging.consumer_group.lag.current_offset", lag.CurrentOffset),
+			attribute.Int64("messaging.consumer_group.lag.end_offset", lag.EndOffset),
+			attribute.Int64("messaging.consumer_group.lag.lag", lag.Lag),
 		)
 
 		span.AddEvent("partition_lag_recorded", trace.WithAttributes(
@@ -327,9 +346,9 @@ func (t *ConsumerGroupTracker) RecordPartitionLag(ctx context.Context, lag Parti
 	}
 }
 
-// partitionKey creates a unique key for topic:partition
+// partitionKey creates a unique key for topic:partition.
 func partitionKey(topic string, partition int) string {
-	return topic + ":" + string(rune('0'+partition))
+	return topic + ":" + strconv.Itoa(partition)
 }
 
 // RecordConsumerGroupMetrics records consumer group metrics on the current span.

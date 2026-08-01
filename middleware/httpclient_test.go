@@ -60,7 +60,7 @@ func TestHTTPClientPropagatesTraceContext(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Get(ctx, server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Verify traceparent header was injected
 	traceparent := receivedHeaders.Get("Traceparent")
@@ -82,7 +82,7 @@ func TestHTTPClientGet(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Get(context.Background(), server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -107,7 +107,7 @@ func TestHTTPClientPost(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Post(context.Background(), server.URL, "application/json", []byte(`{"name":"test"}`))
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 	assert.Equal(t, "application/json", receivedContentType)
@@ -127,7 +127,7 @@ func TestHTTPClientPut(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Put(context.Background(), server.URL, "application/json", []byte(`{"id":1}`))
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -145,7 +145,7 @@ func TestHTTPClientDelete(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Delete(context.Background(), server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
@@ -163,7 +163,7 @@ func TestHTTPClientPatch(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Patch(context.Background(), server.URL, "application/json", []byte(`{"field":"value"}`))
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -288,10 +288,10 @@ func TestHTTPClientWithoutSpans(t *testing.T) {
 	client := NewHTTPClient(WithoutSpans())
 	resp, err := client.Get(ctx, server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	span.End()
-	tp.ForceFlush(context.Background())
+	require.NoError(t, tp.ForceFlush(context.Background()))
 
 	// Should only have the parent span, not client span
 	spans := exporter.GetSpans()
@@ -317,10 +317,10 @@ func TestHTTPClientCreatesSpans(t *testing.T) {
 	client := NewHTTPClient() // spans enabled by default
 	resp, err := client.Get(ctx, server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	span.End()
-	tp.ForceFlush(context.Background())
+	require.NoError(t, tp.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
 	assert.GreaterOrEqual(t, len(spans), 2, "should have parent span and HTTP client span")
@@ -346,9 +346,9 @@ func TestHTTPClientCustomSpanName(t *testing.T) {
 	ctx := context.Background()
 	resp, err := client.Get(ctx, server.URL)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	tp.ForceFlush(context.Background())
+	require.NoError(t, tp.ForceFlush(context.Background()))
 
 	spans := exporter.GetSpans()
 	found := false
@@ -396,9 +396,9 @@ func TestHTTPClientErrorHandling(t *testing.T) {
 	client := NewHTTPClient(WithResponseStatus())
 	resp, err := client.Get(context.Background(), server.URL)
 	require.NoError(t, err) // HTTP errors don't return Go errors
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	tp.ForceFlush(context.Background())
+	require.NoError(t, tp.ForceFlush(context.Background()))
 
 	// The span should have error status
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
@@ -419,7 +419,7 @@ func TestHTTPClientPostNilBody(t *testing.T) {
 	client := NewHTTPClient()
 	resp, err := client.Post(context.Background(), server.URL, "application/json", nil)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -442,7 +442,7 @@ func TestHTTPClientDo(t *testing.T) {
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodOptions, server.URL+"/custom", nil)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.MethodOptions, receivedMethod)
 	assert.Equal(t, "/custom", receivedPath)
@@ -451,4 +451,98 @@ func TestHTTPClientDo(t *testing.T) {
 func TestHTTPTransportNilBase(t *testing.T) {
 	transport := NewHTTPTransport(nil)
 	assert.NotNil(t, transport.base)
+}
+
+func TestTracedTransportDoesNotMutateRequest(t *testing.T) {
+	_, cleanup := autoteltesting.SetupTest(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tracer := otel.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "parent")
+	defer span.End()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+
+	transport := NewHTTPTransport(http.DefaultTransport)
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	// http.RoundTripper must not modify the request it is given: retries and
+	// redirects reuse it, and a shared request would race.
+	assert.Empty(t, req.Header.Get("traceparent"),
+		"RoundTrip must inject into a clone, not the caller's request")
+}
+
+func TestTracedTransportInjectsIntoOutboundRequest(t *testing.T) {
+	_, cleanup := autoteltesting.SetupTest(t)
+	defer cleanup()
+
+	var received string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tracer := otel.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "parent")
+	defer span.End()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := NewHTTPTransport(http.DefaultTransport).RoundTrip(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.NotEmpty(t, received, "the outbound request must carry trace context")
+}
+
+func TestHTTPClientRecordsSemconvAttributes(t *testing.T) {
+	_, cleanup := autoteltesting.SetupTest(t)
+	defer cleanup()
+
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	otel.SetTracerProvider(tp)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient()
+	resp, err := client.Get(context.Background(), server.URL+"/orders?token=secret")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.NoError(t, tp.ForceFlush(context.Background()))
+
+	var clientSpan tracetest.SpanStub
+	for _, s := range exporter.GetSpans() {
+		if s.SpanKind == trace.SpanKindClient {
+			clientSpan = s
+		}
+	}
+	require.NotEmpty(t, clientSpan.Name, "expected a client span")
+
+	attrs := map[string]string{}
+	for _, kv := range clientSpan.Attributes {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+
+	assert.Equal(t, http.MethodGet, attrs["http.request.method"])
+	assert.Equal(t, "/orders", attrs["url.path"])
+	assert.Equal(t, "127.0.0.1", attrs["server.address"])
+	assert.Equal(t, "418", attrs["http.response.status_code"])
+
+	// The query string routinely carries credentials and must not be recorded.
+	assert.NotContains(t, attrs["url.full"], "secret")
 }

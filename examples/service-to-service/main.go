@@ -61,8 +61,7 @@ func main() {
 	// Service B: Downstream API (users service)
 	serviceBMux := http.NewServeMux()
 	serviceBMux.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		ctx, span := autotel.Start(ctx, "GetUserDetails")
+		_, span := autotel.Start(r.Context(), "GetUserDetails")
 		defer span.End()
 
 		// Simulate some work
@@ -120,7 +119,7 @@ func main() {
 			http.Error(w, "Failed to get user", http.StatusInternalServerError)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		var user map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {

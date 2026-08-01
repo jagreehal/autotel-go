@@ -216,20 +216,6 @@ func WithSpanFilter(predicate processors.SpanFilterPredicate) Option {
 	}
 }
 
-// WithSpanNameNormalizer sets a function to normalize span names (API parity; see processors package).
-func WithSpanNameNormalizer(fn processors.SpanNameNormalizerFn) Option {
-	return func(c *Config) {
-		c.SpanNameNormalizer = fn
-	}
-}
-
-// WithAttributeRedactor sets a function to redact attribute values (API parity; see processors package).
-func WithAttributeRedactor(fn processors.AttributeRedactorFn) Option {
-	return func(c *Config) {
-		c.AttributeRedactor = fn
-	}
-}
-
 // WithTailSampling enables tail sampling: spans with sampling.tail.evaluated=true and
 // sampling.tail.keep=false are dropped. Callers must set these attributes to use tail sampling.
 func WithTailSampling(enabled bool) Option {

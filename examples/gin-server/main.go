@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/jagreehal/autotel-go/v2"
 	"github.com/jagreehal/autotel-go/v2/middleware"
 )
@@ -35,7 +36,9 @@ func main() {
 	// Start server
 	log.Println("Starting Gin server on :8080")
 	if err := r.Run(":8080"); err != nil {
-		log.Fatal(err)
+		// Not log.Fatal: it would skip the deferred cleanup and drop the buffered
+		// spans that explain why the server stopped.
+		log.Printf("server stopped: %v", err)
 	}
 }
 

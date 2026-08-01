@@ -185,8 +185,8 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 }
 
 // buildSpanProcessors creates batch span processors for all exporters.
-// When SpanFilter, SpanNameNormalizer, AttributeRedactor, or TailSamplingEnabled are set,
-// each exporter is wrapped in a chain: filter -> normalizer -> redactor -> tail -> batch.
+// When SpanFilter or TailSamplingEnabled are set, each exporter is wrapped
+// in a chain: filter -> tail -> batch.
 func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.SpanProcessor {
 	out := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
 	out = append(out, cfg.SpanProcessors...)
@@ -199,12 +199,6 @@ func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.Sp
 		)
 		if cfg.TailSamplingEnabled {
 			p = processors.NewTailSamplingSpanProcessor(p)
-		}
-		if cfg.AttributeRedactor != nil {
-			p = processors.NewAttributeRedactingProcessor(cfg.AttributeRedactor, p)
-		}
-		if cfg.SpanNameNormalizer != nil {
-			p = processors.NewSpanNameNormalizingProcessor(cfg.SpanNameNormalizer, p)
 		}
 		if cfg.SpanFilter != nil {
 			p = processors.NewFilteringSpanProcessor(cfg.SpanFilter, p)

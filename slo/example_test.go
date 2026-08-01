@@ -1,6 +1,7 @@
 package slo_test
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -22,11 +23,11 @@ func ExampleTracker() {
 	}
 
 	for range 99 {
-		if _, err := tracker.Record(slo.OutcomeGood); err != nil {
+		if _, err := tracker.Record(context.Background(), slo.OutcomeGood); err != nil {
 			log.Fatal(err)
 		}
 	}
-	snapshot, err := tracker.Record(slo.OutcomeBad)
+	snapshot, err := tracker.Record(context.Background(), slo.OutcomeBad)
 	if err != nil {
 		log.Fatal(err)
 	}

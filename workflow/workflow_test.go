@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 )
@@ -13,7 +14,7 @@ func TestWorkflow_SuccessfulExecution(t *testing.T) {
 
 	var executionOrder []string
 
-	wf := New("test-workflow", ctx)
+	wf := New(ctx, "test-workflow")
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		executionOrder = append(executionOrder, "step1")
 		return nil
@@ -52,7 +53,7 @@ func TestWorkflow_FailureWithCompensation(t *testing.T) {
 
 	var executionOrder []string
 
-	wf := New("test-workflow", ctx, WithCompensationMode(CompensateOnFailure))
+	wf := New(ctx, "test-workflow", WithCompensationMode(CompensateOnFailure))
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		executionOrder = append(executionOrder, "step1")
 		return nil
@@ -102,7 +103,7 @@ func TestWorkflow_FailureWithoutCompensation(t *testing.T) {
 
 	var executionOrder []string
 
-	wf := New("test-workflow", ctx, WithCompensationMode(CompensateNever))
+	wf := New(ctx, "test-workflow", WithCompensationMode(CompensateNever))
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		executionOrder = append(executionOrder, "step1")
 		return nil
@@ -132,7 +133,7 @@ func TestWorkflow_ManualCompensation(t *testing.T) {
 
 	var executionOrder []string
 
-	wf := New("test-workflow", ctx, WithCompensationMode(CompensateManual))
+	wf := New(ctx, "test-workflow", WithCompensationMode(CompensateManual))
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		executionOrder = append(executionOrder, "step1")
 		return nil
@@ -171,7 +172,7 @@ func TestWorkflow_ManualCompensation(t *testing.T) {
 func TestWorkflow_CompensationFailure(t *testing.T) {
 	ctx := context.Background()
 
-	wf := New("test-workflow", ctx)
+	wf := New(ctx, "test-workflow")
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		return nil
 	}, WithCompensation(func(ctx context.Context, span trace.Span) error {
@@ -195,7 +196,7 @@ func TestWorkflow_CompensationFailure(t *testing.T) {
 func TestWorkflow_DoubleRun(t *testing.T) {
 	ctx := context.Background()
 
-	wf := New("test-workflow", ctx)
+	wf := New(ctx, "test-workflow")
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		return nil
 	})
@@ -214,7 +215,7 @@ func TestWorkflow_DoubleRun(t *testing.T) {
 func TestWorkflow_EmptyWorkflow(t *testing.T) {
 	ctx := context.Background()
 
-	wf := New("empty-workflow", ctx)
+	wf := New(ctx, "empty-workflow")
 
 	err := wf.Run(ctx)
 	if err != nil {
@@ -231,7 +232,7 @@ func TestWorkflow_FirstStepFails(t *testing.T) {
 
 	var compensationRan bool
 
-	wf := New("test-workflow", ctx)
+	wf := New(ctx, "test-workflow")
 	wf.Step("step1", func(ctx context.Context, span trace.Span) error {
 		return errors.New("immediate failure")
 	}, WithCompensation(func(ctx context.Context, span trace.Span) error {
@@ -255,7 +256,7 @@ func TestWorkflow_StepAttributes(t *testing.T) {
 
 	var capturedSpan trace.Span
 
-	wf := New("test-workflow", ctx)
+	wf := New(ctx, "test-workflow")
 	wf.Step("step-with-attrs", func(ctx context.Context, span trace.Span) error {
 		capturedSpan = span
 		return nil
@@ -276,7 +277,7 @@ func TestWorkflow_ChainedSteps(t *testing.T) {
 
 	var executionOrder []string
 
-	wf := New("chained-workflow", ctx).
+	wf := New(ctx, "chained-workflow").
 		Step("a", func(ctx context.Context, span trace.Span) error {
 			executionOrder = append(executionOrder, "a")
 			return nil
@@ -300,5 +301,95 @@ func TestWorkflow_ChainedSteps(t *testing.T) {
 		if executionOrder[i] != step {
 			t.Errorf("step %d: expected %s, got %s", i, step, executionOrder[i])
 		}
+	}
+}
+
+func TestWorkflow_RetryActuallyWaitsBetweenAttempts(t *testing.T) {
+	ctx := context.Background()
+
+	var attempts int
+	start := time.Now()
+
+	wf := New(ctx, "retry-workflow")
+	wf.Step("flaky", func(ctx context.Context, span trace.Span) error {
+		attempts++
+		return errors.New("still failing")
+	}, WithRetry(RetryConfig{
+		MaxAttempts: 3,
+		BackoffMs:   40,
+		Multiplier:  2.0,
+	}))
+
+	err := wf.Run(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the step to fail after exhausting retries")
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	// Backoffs are 40ms then 80ms. Without a real sleep this returns in microseconds.
+	if elapsed < 110*time.Millisecond {
+		t.Errorf("expected retries to wait out the backoff (>=110ms), took %v", elapsed)
+	}
+}
+
+func TestWorkflow_RetryStopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	var attempts int
+	start := time.Now()
+
+	wf := New(ctx, "cancelled-retry")
+	wf.Step("flaky", func(ctx context.Context, span trace.Span) error {
+		attempts++
+		return errors.New("still failing")
+	}, WithRetry(RetryConfig{
+		MaxAttempts: 10,
+		BackoffMs:   500,
+	}))
+
+	err := wf.Run(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when the context is cancelled mid-backoff")
+	}
+	if attempts != 1 {
+		t.Errorf("expected to abandon retries after 1 attempt, got %d", attempts)
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("expected the backoff sleep to be cut short by cancellation, took %v", elapsed)
+	}
+}
+
+func TestWorkflow_CompensationRunsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var compensated bool
+
+	wf := New(ctx, "cancel-compensate", WithCompensationMode(CompensateOnFailure))
+	wf.Step("charge", func(ctx context.Context, span trace.Span) error {
+		return nil
+	}, WithCompensation(func(ctx context.Context, span trace.Span) error {
+		// Rollback must still run even though the workflow context is cancelled.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		compensated = true
+		return nil
+	}))
+	wf.Step("ship", func(ctx context.Context, span trace.Span) error {
+		cancel()
+		return errors.New("shipping failed")
+	})
+
+	if err := wf.Run(ctx); err == nil {
+		t.Fatal("expected the workflow to fail")
+	}
+	if !compensated {
+		t.Error("expected compensation to run on a context detached from cancellation")
 	}
 }

@@ -27,7 +27,7 @@ func main() {
 			subscribers.WithPostHogDistinctID("user-123"),
 		),
 	)
-	defer queue.Shutdown(context.Background())
+	defer func() { _ = queue.Shutdown(context.Background()) }()
 
 	// Track user signup event
 	ctx := context.Background()

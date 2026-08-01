@@ -98,11 +98,9 @@ type Config struct {
 	// Additional span processors to attach.
 	SpanProcessors []trace.SpanProcessor
 
-	// Optional pipeline: filter, name normalizer, attribute redactor, tail sampling.
-	// When set, these wrap each batch exporter in order: filter -> normalizer -> redactor -> tail -> batch.
+	// Optional pipeline: span filter and tail sampling.
+	// When set, these wrap each batch exporter in order: filter -> tail -> batch.
 	SpanFilter          processors.SpanFilterPredicate
-	SpanNameNormalizer  processors.SpanNameNormalizerFn
-	AttributeRedactor   processors.AttributeRedactorFn
 	TailSamplingEnabled bool
 
 	// Event queue tuning.

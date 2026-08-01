@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.opentelemetry.io/otel"
@@ -215,6 +216,9 @@ func ProcessBatch(ctx context.Context, messages []Message, handler func(context.
 // This creates:
 // - One parent "batch" span
 // - One child span per message (linked to producers if configured)
+//
+// Every message is attempted even if earlier ones fail. If any message failed,
+// the joined error is returned; use errors.Is/errors.As to inspect it.
 func (p *BatchProcessor) ProcessEach(ctx context.Context, messages []Message, handler func(context.Context, trace.Span, Message) error) error {
 	batchSize := len(messages)
 	if batchSize == 0 {
@@ -242,6 +246,7 @@ func (p *BatchProcessor) ProcessEach(ctx context.Context, messages []Message, ha
 	batchSpan.AddEvent("batch.processing_started")
 
 	failedCount := 0
+	var itemErrors []error
 	for i, msg := range messages {
 		itemSpanName := fmt.Sprintf("%s.process %s [%d/%d]", p.config.System, p.config.Destination, i+1, batchSize)
 
@@ -265,6 +270,7 @@ func (p *BatchProcessor) ProcessEach(ctx context.Context, messages []Message, ha
 		err := handler(itemCtx, itemSpan, msg)
 		if err != nil {
 			failedCount++
+			itemErrors = append(itemErrors, fmt.Errorf("message %s: %w", msg.ID(), err))
 			itemSpan.RecordError(err)
 			itemSpan.SetStatus(codes.Error, err.Error())
 		}
@@ -282,5 +288,5 @@ func (p *BatchProcessor) ProcessEach(ctx context.Context, messages []Message, ha
 		batchSpan.SetStatus(codes.Error, fmt.Sprintf("%d/%d messages failed", failedCount, batchSize))
 	}
 
-	return nil
+	return errors.Join(itemErrors...)
 }

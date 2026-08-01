@@ -46,10 +46,12 @@ type Snapshot struct {
 	Bad                 int64
 	SLI                 *float64
 	ErrorBudgetFraction float64
-	BudgetConsumed      float64
-	BudgetRemaining     float64
-	BurnRate            float64
-	MeetsTarget         bool
+	// BurnRate is the fraction of the error budget consumed by the observed
+	// failure rate: 1.0 means the budget is being spent exactly at the rate that
+	// exhausts it over the window. BudgetRemaining is 1 - BurnRate.
+	BurnRate        float64
+	BudgetRemaining float64
+	MeetsTarget     bool
 }
 
 // BurnRateAlertReason explains a dual-window burn-rate decision.
@@ -263,7 +265,10 @@ func validateDefinition(definition Definition) error {
 }
 
 // Record adds an outcome and returns the updated snapshot.
-func (tracker *Tracker) Record(outcome Outcome, attributes ...attribute.KeyValue) (Snapshot, error) {
+//
+// ctx is used for metric recording, so exemplars link the recorded outcome back
+// to the span that produced it. Pass the request's context, not context.Background().
+func (tracker *Tracker) Record(ctx context.Context, outcome Outcome, attributes ...attribute.KeyValue) (Snapshot, error) {
 	if outcome != OutcomeGood && outcome != OutcomeBad {
 		return Snapshot{}, fmt.Errorf("slo: outcome must be %q or %q", OutcomeGood, OutcomeBad)
 	}
@@ -285,11 +290,11 @@ func (tracker *Tracker) Record(outcome Outcome, attributes ...attribute.KeyValue
 		attribute.String("slo.outcome", string(outcome)),
 	)
 	if tracker.outcomeCounter != nil {
-		tracker.outcomeCounter.Add(context.Background(), 1, metric.WithAttributes(metricAttributes...))
+		tracker.outcomeCounter.Add(ctx, 1, metric.WithAttributes(metricAttributes...))
 	}
 	if tracker.burnRateHistogram != nil {
 		tracker.burnRateHistogram.Record(
-			context.Background(),
+			ctx,
 			snapshot.BurnRate,
 			metric.WithAttributes(attribute.String("slo.name", tracker.definition.Name)),
 		)
@@ -451,9 +456,8 @@ func (tracker *Tracker) snapshot(at time.Time) Snapshot {
 		Bad:                 bad,
 		SLI:                 sli,
 		ErrorBudgetFraction: errorBudgetFraction,
-		BudgetConsumed:      burnRate,
-		BudgetRemaining:     1 - burnRate,
 		BurnRate:            burnRate,
+		BudgetRemaining:     1 - burnRate,
 		MeetsTarget:         sli == nil || *sli >= tracker.definition.Target,
 	}
 }

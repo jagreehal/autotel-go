@@ -386,7 +386,7 @@ Trace distributed transactions with automatic compensation on failure:
 ```go
 import "github.com/jagreehal/autotel-go/v2/workflow"
 
-wf := workflow.New("order-fulfillment", ctx)
+wf := workflow.New(ctx, "order-fulfillment")
 
 wf.Step("validate", func(ctx context.Context, span trace.Span) error {
     return validateOrder(ctx, order)
@@ -614,7 +614,7 @@ Link workflow steps and configure retry behavior:
 ```go
 import "github.com/jagreehal/autotel-go/v2/workflow"
 
-wf := workflow.New("order-fulfillment", ctx)
+wf := workflow.New(ctx, "order-fulfillment")
 
 wf.Step("validate", validateOrder)
 
@@ -691,7 +691,7 @@ if err != nil {
     log.Fatal(err)
 }
 
-snapshot, err := tracker.Record(slo.OutcomeGood)
+snapshot, err := tracker.Record(ctx, slo.OutcomeGood)
 if err != nil {
     log.Fatal(err)
 }

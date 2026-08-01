@@ -59,7 +59,9 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 	if err := server.ListenAndServe(); err != nil {
-		log.Fatal(err)
+		// Not log.Fatal: it would skip the deferred cleanup and drop the buffered
+		// spans that explain why the server stopped.
+		log.Printf("server stopped: %v", err)
 	}
 }
 
