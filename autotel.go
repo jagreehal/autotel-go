@@ -542,9 +542,9 @@ func endpointIsURL(endpoint string) bool {
 // Config carries one Endpoint for every signal, which makes it the base endpoint
 // in OTLP terms, so the signal path belongs on the end of it. WithEndpointURL
 // takes the path as complete and does not append anything, so a base carrying a
-// path of its own — a collector mounted under /otlp, a vendor gateway path —
-// would otherwise have traces posted to the base itself. A base with no path
-// needs no help: the exporter already falls back to the default signal path.
+// path of its own — Langfuse's /api/public/otel, PostHog's /i, a Grafana gateway
+// path — would otherwise have traces posted to the base itself. A base with no
+// path needs no help: the exporter already falls back to the default signal path.
 func signalEndpointURL(base, signalPath string) string {
 	parsed, err := url.Parse(base)
 	if err != nil || parsed.Path == "" || parsed.Path == "/" {

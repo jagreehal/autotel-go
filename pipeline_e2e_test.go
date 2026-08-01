@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	otelbaggage "go.opentelemetry.io/otel/baggage"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -48,6 +49,21 @@ func spanNames(exporter *tracetest.InMemoryExporter) []string {
 		names = append(names, s.Name)
 	}
 	return names
+}
+
+// setBaggage attaches the given members to ctx.
+func setBaggage(ctx context.Context, pairs map[string]string) (context.Context, error) {
+	bag := otelbaggage.Baggage{}
+	for key, value := range pairs {
+		member, err := otelbaggage.NewMember(key, value)
+		if err != nil {
+			return ctx, err
+		}
+		if bag, err = bag.SetMember(member); err != nil {
+			return ctx, err
+		}
+	}
+	return otelbaggage.ContextWithBaggage(ctx, bag), nil
 }
 
 func contains(names []string, want string) bool {
@@ -107,6 +123,41 @@ func TestWithTailSamplingDropsSpansEndToEnd(t *testing.T) {
 		if !contains(names, want) {
 			t.Errorf("span %q should have been kept: %v", want, names)
 		}
+	}
+}
+
+func TestWithBaggageAttributesEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithBaggageAttributes(
+		processors.WithBaggageAllowlist("tenant_id"),
+	))
+
+	ctx, err := setBaggage(context.Background(), map[string]string{
+		"tenant_id": "acme",
+		"secret":    "not-copied",
+	})
+	if err != nil {
+		t.Fatalf("baggage: %v", err)
+	}
+
+	_, span := autotel.Start(ctx, "op")
+	span.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("no spans exported")
+	}
+
+	attrs := make(map[string]string)
+	for _, kv := range spans[0].Attributes {
+		attrs[string(kv.Key)] = kv.Value.String()
+	}
+	if attrs["baggage.tenant_id"] != "acme" {
+		t.Errorf("baggage was not copied onto the span: %v", attrs)
+	}
+	if _, present := attrs["baggage.secret"]; present {
+		t.Error("a key outside the allowlist was copied onto the span")
 	}
 }
 
