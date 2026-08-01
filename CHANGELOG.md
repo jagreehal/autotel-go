@@ -16,6 +16,10 @@ All notable changes to this project will be documented in this file.
   through `WithEndpointURL`, which also parses the path component that vendor
   presets need, and lets the scheme determine TLS rather than the `Insecure` flag.
   Both `http://host:port/path` and bare `host:port` work. Present since v2.0.0.
+  An endpoint carrying a base path (a collector mounted under `/otlp`, a vendor
+  gateway path) now has the per-signal path appended, since `Config.Endpoint`
+  covers every signal and is therefore the OTLP base endpoint. Without that,
+  traces were posted to the base itself rather than `<base>/v1/traces`.
 - **`WithSpanFilter` and `WithTailSampling` had no effect.** The config merge
   rebuilt the config from defaults and copied back only a hand-maintained list of
   fields; neither pipeline field was on it, so both options were silently

@@ -3,6 +3,7 @@ package autotel
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -441,7 +442,7 @@ func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporte
 			otlptmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 		}
 		if endpointIsURL(cfg.Endpoint) {
-			httpOpts = append(httpOpts, otlpmetrichttp.WithEndpointURL(cfg.Endpoint))
+			httpOpts = append(httpOpts, otlpmetrichttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
 		} else {
 			httpOpts = append(httpOpts, otlptmetricWithEndpoint(cfg.Endpoint))
 			if cfg.Insecure {
@@ -456,7 +457,7 @@ func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporte
 		otlpgmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
 	if endpointIsURL(cfg.Endpoint) {
-		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithEndpointURL(cfg.Endpoint))
+		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
 	} else {
 		grpcOpts = append(grpcOpts, otlpgmetricWithEndpoint(cfg.Endpoint))
 		if cfg.Insecure {
@@ -507,16 +508,42 @@ func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, err
 	return exportersList, nil
 }
 
+// Per-signal OTLP paths appended to a base endpoint URL.
+const (
+	tracesPath  = "/v1/traces"
+	metricsPath = "/v1/metrics"
+)
+
 // endpointIsURL reports whether the configured endpoint is a full URL
 // ("https://host:port/path") rather than the bare "host:port" form.
 //
 // The two forms need different exporter options. WithEndpoint stores the string
 // verbatim as the host, so passing a URL to it yields a mangled target such as
 // "http://http:%2F%2Flocalhost:4318/v1/traces". WithEndpointURL parses the URL
-// properly and derives TLS from the scheme, which is also what vendor presets
-// with a path component (Langfuse, PostHog) require.
+// properly and derives TLS from the scheme.
 func endpointIsURL(endpoint string) bool {
 	return strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://")
+}
+
+// signalEndpointURL joins a base endpoint URL with a per-signal OTLP path.
+//
+// Config carries one Endpoint for every signal, which makes it the base endpoint
+// in OTLP terms, so the signal path belongs on the end of it. WithEndpointURL
+// takes the path as complete and does not append anything, so a base carrying a
+// path of its own — a collector mounted under /otlp, a vendor gateway path —
+// would otherwise have traces posted to the base itself. A base with no path
+// needs no help: the exporter already falls back to the default signal path.
+func signalEndpointURL(base, signalPath string) string {
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Path == "" || parsed.Path == "/" {
+		return base
+	}
+	// Respect an endpoint that already names the signal explicitly.
+	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), signalPath) {
+		return base
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + signalPath
+	return parsed.String()
 }
 
 func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, error) {
@@ -527,7 +554,7 @@ func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, erro
 		}
 		if endpointIsURL(cfg.Endpoint) {
 			// The scheme decides TLS; passing WithInsecure as well would override it.
-			httpOpts = append(httpOpts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+			httpOpts = append(httpOpts, otlptracehttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
 		} else {
 			httpOpts = append(httpOpts, otlptracehttp.WithEndpoint(cfg.Endpoint))
 			if cfg.Insecure {
@@ -542,7 +569,7 @@ func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, erro
 		otlptracegrpc.WithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
 	if endpointIsURL(cfg.Endpoint) {
-		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpointURL(cfg.Endpoint))
+		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
 	} else {
 		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
 		if cfg.Insecure {

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	"github.com/jagreehal/autotel-go/v2"
 )
 
@@ -43,6 +45,8 @@ func TestInitAcceptsBothEndpointForms(t *testing.T) {
 				autotel.WithService("endpoint-test"),
 				autotel.WithEndpoint(endpoint),
 				autotel.WithInsecure(true),
+				// The default sampler keeps 10% of traces, which would make this flaky.
+				autotel.WithSampler(sdktrace.AlwaysSample()),
 				autotel.WithBatchTimeout(100*time.Millisecond),
 			)
 			if err != nil {
