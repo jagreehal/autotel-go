@@ -8,6 +8,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`WithEndpoint` now accepts a URL.** `otlptracehttp.WithEndpoint` stores its
+  argument verbatim as the host, so the `http://host:port` form used by the README,
+  QUICKSTART, and six of the eight shipped examples produced a mangled target
+  (`http://http:%2F%2Flocalhost:4318/v1/metrics`) and made `Init` return an error
+  before any telemetry was configured. An endpoint carrying a scheme is now routed
+  through `WithEndpointURL`, which also parses the path component that vendor
+  presets need, and lets the scheme determine TLS rather than the `Insecure` flag.
+  Both `http://host:port/path` and bare `host:port` work. Present since v2.0.0.
 - Corrected the module path to `github.com/jagreehal/autotel-go/v2` and updated
   every internal, example, test, and documentation import. This makes v2
   consumable through Go's semantic import versioning. **v2.0.0 was published
