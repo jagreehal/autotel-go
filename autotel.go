@@ -2,6 +2,7 @@ package autotel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -63,6 +64,11 @@ func Init(ctx context.Context, opts ...Option) (func(), error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	// Report option validation failures before building anything, so a missing
+	// API key fails loudly at startup instead of exporting into the void.
+	if err := errors.Join(cfg.optionErrors...); err != nil {
+		return nil, err
 	}
 	return initWithConfig(ctx, cfg)
 }
@@ -187,7 +193,10 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 
 // buildSpanProcessors creates batch span processors for all exporters.
 // When SpanFilter or TailSamplingEnabled are set, each exporter is wrapped
-// in a chain: filter -> tail -> batch.
+// in a chain: baggage -> filter -> tail -> batch.
+//
+// The baggage stage sits outermost because it writes attributes in OnStart,
+// which has to happen before any stage that inspects them.
 func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.SpanProcessor {
 	out := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
 	out = append(out, cfg.SpanProcessors...)
@@ -203,6 +212,9 @@ func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.Sp
 		}
 		if cfg.SpanFilter != nil {
 			p = processors.NewFilteringSpanProcessor(cfg.SpanFilter, p)
+		}
+		if cfg.BaggageToAttributes {
+			p = processors.NewBaggageSpanProcessor(p, cfg.BaggageSpanProcOpts...)
 		}
 		out = append(out, p)
 	}

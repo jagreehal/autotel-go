@@ -103,6 +103,11 @@ type Config struct {
 	SpanFilter          processors.SpanFilterPredicate
 	TailSamplingEnabled bool
 
+	// BaggageToAttributes copies baggage onto span attributes when set.
+	// Configure with WithBaggageAttributes.
+	BaggageToAttributes bool
+	BaggageSpanProcOpts []processors.BaggageSpanProcessorOption
+
 	// Event queue tuning.
 	EventQueueSize     int
 	EventFlushInterval time.Duration
@@ -125,6 +130,25 @@ type Config struct {
 	MetricsEnabled  bool
 	MetricExporters []metric.Exporter
 	MetricInterval  time.Duration
+
+	// optionErrors collects validation failures raised by options, so a bad
+	// vendor preset surfaces as an Init error rather than panicking or silently
+	// exporting nowhere. Append via OptionError.
+	optionErrors []error
+}
+
+// OptionError records a validation failure on the config. Options that can fail
+// validation — vendor presets in particular — call this instead of panicking, so
+// the failure surfaces from Init with everything else.
+func (c *Config) OptionError(err error) {
+	if err != nil {
+		c.optionErrors = append(c.optionErrors, err)
+	}
+}
+
+// OptionErrors returns the validation failures accumulated by options.
+func (c *Config) OptionErrors() []error {
+	return c.optionErrors
 }
 
 // DefaultConfig returns a Config with sensible defaults.

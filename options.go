@@ -177,6 +177,17 @@ func WithSubscribers(subscribers ...Subscriber) Option {
 
 // WithBackend enables a vendor preset ("datadog", "honeycomb", "grafana", "otlp").
 // Presets remain OTLP-first and only adjust endpoints/headers.
+//
+// Deprecated: use the typed presets in the backends package. This form takes
+// credentials only from environment variables, and an unrecognised name falls
+// through silently, so a typo exports to the default endpoint instead of the
+// vendor. The typed presets accept credentials directly and report a bad
+// configuration through Init:
+//
+//	autotel.Init(ctx, backends.Honeycomb(backends.HoneycombConfig{
+//	    APIKey:  os.Getenv("HONEYCOMB_API_KEY"),
+//	    Service: "checkout",
+//	}))
 func WithBackend(name string) Option {
 	return func(c *Config) {
 		c.BackendPreset = name
@@ -213,6 +224,28 @@ func WithSpanProcessors(procs ...trace.SpanProcessor) Option {
 func WithSpanFilter(predicate processors.SpanFilterPredicate) Option {
 	return func(c *Config) {
 		c.SpanFilter = predicate
+	}
+}
+
+// WithBaggageAttributes copies baggage entries onto span attributes, making
+// business context propagated through baggage visible in a trace UI without
+// setting the same attributes by hand on every span.
+//
+// Baggage crosses service boundaries in a header, so at a trust boundary pass
+// processors.WithBaggageAllowlist to copy only the keys you expect, rather than
+// everything an upstream caller chose to send.
+//
+// Example:
+//
+//	autotel.Init(ctx,
+//	    autotel.WithBaggageAttributes(
+//	        processors.WithBaggageAllowlist("tenant_id", "region"),
+//	    ),
+//	)
+func WithBaggageAttributes(opts ...processors.BaggageSpanProcessorOption) Option {
+	return func(c *Config) {
+		c.BaggageToAttributes = true
+		c.BaggageSpanProcOpts = append(c.BaggageSpanProcOpts, opts...)
 	}
 }
 
