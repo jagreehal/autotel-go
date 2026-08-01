@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func BenchmarkStart(b *testing.B) {

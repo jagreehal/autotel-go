@@ -1,7 +1,7 @@
 package subscribers
 
 import (
-	"github.com/jagreehal/autotel-go"
+	"github.com/jagreehal/autotel-go/v2"
 )
 
 func init() {

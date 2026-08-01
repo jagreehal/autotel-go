@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/middleware"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/middleware"
 )
 
 func main() {

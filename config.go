@@ -6,10 +6,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/jagreehal/autotel-go/circuitbreaker"
-	"github.com/jagreehal/autotel-go/ratelimit"
-	"github.com/jagreehal/autotel-go/redaction"
-	"github.com/jagreehal/autotel-go/sampling"
+	"github.com/jagreehal/autotel-go/v2/circuitbreaker"
+	"github.com/jagreehal/autotel-go/v2/processors"
+	"github.com/jagreehal/autotel-go/v2/ratelimit"
+	"github.com/jagreehal/autotel-go/v2/redaction"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // Protocol defines the OTLP protocol to use
@@ -96,6 +97,13 @@ type Config struct {
 
 	// Additional span processors to attach.
 	SpanProcessors []trace.SpanProcessor
+
+	// Optional pipeline: filter, name normalizer, attribute redactor, tail sampling.
+	// When set, these wrap each batch exporter in order: filter -> normalizer -> redactor -> tail -> batch.
+	SpanFilter          processors.SpanFilterPredicate
+	SpanNameNormalizer  processors.SpanNameNormalizerFn
+	AttributeRedactor   processors.AttributeRedactorFn
+	TailSamplingEnabled bool
 
 	// Event queue tuning.
 	EventQueueSize     int

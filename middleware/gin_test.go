@@ -8,7 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func TestGinMiddleware(t *testing.T) {

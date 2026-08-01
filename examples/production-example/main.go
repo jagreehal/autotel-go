@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/middleware"
-	"github.com/jagreehal/autotel-go/redaction"
-	"github.com/jagreehal/autotel-go/sampling"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/middleware"
+	"github.com/jagreehal/autotel-go/v2/redaction"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 func main() {
@@ -50,7 +50,15 @@ func main() {
 	log.Println("  - Circuit breaker protection")
 	log.Println("  - PII redaction")
 
-	if err := http.ListenAndServe(":8080", handler); err != nil {
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

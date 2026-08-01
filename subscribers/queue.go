@@ -8,8 +8,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/debugutil"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/debugutil"
 )
 
 // Queue manages async event delivery to subscribers.

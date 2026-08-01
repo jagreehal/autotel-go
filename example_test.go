@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jagreehal/autotel-go"
+	"github.com/jagreehal/autotel-go/v2"
 )
 
 // Example demonstrates basic usage of autotel.

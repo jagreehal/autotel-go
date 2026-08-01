@@ -6,10 +6,11 @@ import (
 	metricSdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/jagreehal/autotel-go/circuitbreaker"
-	"github.com/jagreehal/autotel-go/ratelimit"
-	"github.com/jagreehal/autotel-go/redaction"
-	"github.com/jagreehal/autotel-go/sampling"
+	"github.com/jagreehal/autotel-go/v2/circuitbreaker"
+	"github.com/jagreehal/autotel-go/v2/processors"
+	"github.com/jagreehal/autotel-go/v2/ratelimit"
+	"github.com/jagreehal/autotel-go/v2/redaction"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // Option is a functional option for configuring autotel
@@ -91,9 +92,54 @@ func WithPIIRedaction(opts ...redaction.PIIRedactorOption) Option {
 }
 
 // WithAdaptiveSampler configures the adaptive sampler with custom options.
+// Use sampling.With* options to customize sampling behavior.
+//
+// Example:
+//
+//	autotel.Init(ctx,
+//	    autotel.WithAdaptiveSampler(
+//	        sampling.WithBaselineRate(0.1),
+//	        sampling.WithLinksBased(true),
+//	        sampling.WithLinksRate(1.0),
+//	    ),
+//	)
 func WithAdaptiveSampler(opts ...sampling.AdaptiveSamplerOption) Option {
 	return func(c *Config) {
 		c.Sampler = sampling.NewAdaptiveSampler(opts...)
+		c.UseAdaptiveSampler = true
+	}
+}
+
+// WithLinksBasedSampling enables links-based sampling for event-driven architectures.
+// When a span is linked to a sampled span (e.g., message consumer linked to producer),
+// it will be sampled at the specified rate to maintain trace continuity.
+//
+// This is essential for message queues and pub-sub systems where consumer spans
+// should be sampled when they process messages from sampled producer spans.
+//
+// Parameters:
+//   - rate: Sampling rate for linked spans (0.0 to 1.0, default 1.0 = 100%)
+//
+// Example:
+//
+//	autotel.Init(ctx,
+//	    autotel.WithLinksBasedSampling(1.0), // 100% sample when linked to sampled span
+//	)
+//
+// Usage with message consumer:
+//
+//	headers := map[string]string{"traceparent": msg.Headers["traceparent"]}
+//	link, ok := sampling.CreateLinkFromHeaders(headers)
+//	if ok {
+//	    ctx, span := tracer.Start(ctx, "process-message", trace.WithLinks(link))
+//	    defer span.End()
+//	}
+func WithLinksBasedSampling(rate float64) Option {
+	return func(c *Config) {
+		c.Sampler = sampling.NewAdaptiveSampler(
+			sampling.WithLinksBased(true),
+			sampling.WithLinksRate(rate),
+		)
 		c.UseAdaptiveSampler = true
 	}
 }
@@ -157,9 +203,38 @@ func WithSpanExporters(exporters ...trace.SpanExporter) Option {
 }
 
 // WithSpanProcessors appends custom span processors.
-func WithSpanProcessors(processors ...trace.SpanProcessor) Option {
+func WithSpanProcessors(procs ...trace.SpanProcessor) Option {
 	return func(c *Config) {
-		c.SpanProcessors = append(c.SpanProcessors, processors...)
+		c.SpanProcessors = append(c.SpanProcessors, procs...)
+	}
+}
+
+// WithSpanFilter sets a predicate to drop spans for which the function returns false.
+func WithSpanFilter(predicate processors.SpanFilterPredicate) Option {
+	return func(c *Config) {
+		c.SpanFilter = predicate
+	}
+}
+
+// WithSpanNameNormalizer sets a function to normalize span names (API parity; see processors package).
+func WithSpanNameNormalizer(fn processors.SpanNameNormalizerFn) Option {
+	return func(c *Config) {
+		c.SpanNameNormalizer = fn
+	}
+}
+
+// WithAttributeRedactor sets a function to redact attribute values (API parity; see processors package).
+func WithAttributeRedactor(fn processors.AttributeRedactorFn) Option {
+	return func(c *Config) {
+		c.AttributeRedactor = fn
+	}
+}
+
+// WithTailSampling enables tail sampling: spans with sampling.tail.evaluated=true and
+// sampling.tail.keep=false are dropped. Callers must set these attributes to use tail sampling.
+func WithTailSampling(enabled bool) Option {
+	return func(c *Config) {
+		c.TailSamplingEnabled = enabled
 	}
 }
 

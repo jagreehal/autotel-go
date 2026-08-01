@@ -5,7 +5,7 @@ Get started with autotel-go in 5 minutes.
 ## Installation
 
 ```bash
-go get github.com/jagreehal/autotel-go
+go get github.com/jagreehal/autotel-go/v2
 ```
 
 ## 1. Initialize
@@ -16,7 +16,7 @@ package main
 import (
     "context"
     "log"
-    "github.com/jagreehal/autotel-go"
+    "github.com/jagreehal/autotel-go/v2"
 )
 
 func main() {
@@ -64,7 +64,7 @@ func GetUser(ctx context.Context, userID string) (*User, error) {
 ## 3. Add HTTP Middleware
 
 ```go
-import "github.com/jagreehal/autotel-go/middleware"
+import "github.com/jagreehal/autotel-go/v2/middleware"
 
 mux := http.NewServeMux()
 mux.HandleFunc("/users", handleUsers)
@@ -92,8 +92,8 @@ cleanup, err := autotel.Init(context.Background(),
 
 ```go
 import (
-    "github.com/jagreehal/autotel-go"
-    "github.com/jagreehal/autotel-go/subscribers"
+    "github.com/jagreehal/autotel-go/v2"
+    "github.com/jagreehal/autotel-go/v2/subscribers"
 )
 
 cleanup, _ := autotel.Init(context.Background(),

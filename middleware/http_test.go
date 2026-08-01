@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func TestHTTPMiddleware(t *testing.T) {

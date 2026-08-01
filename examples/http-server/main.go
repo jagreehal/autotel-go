@@ -4,9 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/middleware"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/middleware"
 )
 
 func main() {
@@ -30,7 +31,15 @@ func main() {
 
 	// Start server
 	log.Println("Starting HTTP server on :8080")
-	if err := http.ListenAndServe(":8080", handler); err != nil {
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

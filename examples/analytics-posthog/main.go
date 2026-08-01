@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/subscribers"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/subscribers"
 )
 
 func main() {

@@ -186,6 +186,7 @@ func loadYamlConfigFromAutotel() (*Config, error) {
 
 // loadYamlConfigFromFile loads YAML config from a specific file path
 func loadYamlConfigFromFile(filePath string) (*Config, error) {
+	// #nosec G304 -- callers intentionally select the local configuration path.
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)

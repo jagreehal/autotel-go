@@ -19,7 +19,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
-	"github.com/jagreehal/autotel-go/internal/exporters"
+	"github.com/jagreehal/autotel-go/v2/internal/exporters"
+	"github.com/jagreehal/autotel-go/v2/processors"
 )
 
 // EventTracker is an interface for tracking analytics events.
@@ -184,18 +185,33 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 }
 
 // buildSpanProcessors creates batch span processors for all exporters.
+// When SpanFilter, SpanNameNormalizer, AttributeRedactor, or TailSamplingEnabled are set,
+// each exporter is wrapped in a chain: filter -> normalizer -> redactor -> tail -> batch.
 func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.SpanProcessor {
-	processors := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
-	processors = append(processors, cfg.SpanProcessors...)
+	out := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
+	out = append(out, cfg.SpanProcessors...)
 
 	for _, exp := range exporters {
-		processors = append(processors, trace.NewBatchSpanProcessor(exp,
+		p := trace.NewBatchSpanProcessor(exp,
 			trace.WithBatchTimeout(cfg.BatchTimeout),
 			trace.WithMaxQueueSize(cfg.MaxQueueSize),
 			trace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
-		))
+		)
+		if cfg.TailSamplingEnabled {
+			p = processors.NewTailSamplingSpanProcessor(p)
+		}
+		if cfg.AttributeRedactor != nil {
+			p = processors.NewAttributeRedactingProcessor(cfg.AttributeRedactor, p)
+		}
+		if cfg.SpanNameNormalizer != nil {
+			p = processors.NewSpanNameNormalizingProcessor(cfg.SpanNameNormalizer, p)
+		}
+		if cfg.SpanFilter != nil {
+			p = processors.NewFilteringSpanProcessor(cfg.SpanFilter, p)
+		}
+		out = append(out, p)
 	}
-	return processors
+	return out
 }
 
 // selectSampler returns the appropriate sampler based on config and debug mode.

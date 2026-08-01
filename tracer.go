@@ -8,7 +8,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "github.com/jagreehal/autotel-go"
+const tracerName = "github.com/jagreehal/autotel-go/v2"
 
 type contextKey string
 
@@ -18,10 +18,25 @@ const (
 
 // GetOperationName returns the operation/span name stored on context by Start/Trace helpers.
 func GetOperationName(ctx context.Context) string {
-	if v, ok := ctx.Value(operationNameKey).(string); ok {
-		return v
+	name, _ := GetOperationContext(ctx)
+	return name
+}
+
+// GetOperationContext returns the current operation name if set (e.g. by Start, Trace, or RunInOperationContext).
+// Use this when you need to know whether an operation context is present (ok == true).
+func GetOperationContext(ctx context.Context) (name string, ok bool) {
+	if v, ok := ctx.Value(operationNameKey).(string); ok && v != "" {
+		return v, true
 	}
-	return ""
+	return "", false
+}
+
+// RunInOperationContext runs fn with the given operation name set on context.
+// Events tracked inside fn will have operation.name set to name (when using the global event queue).
+// Use this to attach an operation name to events without starting a span.
+func RunInOperationContext[T any](ctx context.Context, name string, fn func(context.Context) (T, error)) (T, error) {
+	ctx = context.WithValue(ctx, operationNameKey, name)
+	return fn(ctx)
 }
 
 var (

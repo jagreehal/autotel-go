@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/logging"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/logging"
 )
 
 func main() {
