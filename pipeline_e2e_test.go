@@ -7,11 +7,13 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	otelbaggage "go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/jagreehal/autotel-go/v2"
 	"github.com/jagreehal/autotel-go/v2/processors"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // These tests drive the real Init path rather than inspecting Config, because
@@ -123,6 +125,112 @@ func TestWithTailSamplingDropsSpansEndToEnd(t *testing.T) {
 		if !contains(names, want) {
 			t.Errorf("span %q should have been kept: %v", want, names)
 		}
+	}
+}
+
+// The whole point of an error rate: a failure survives a baseline that keeps
+// nothing. This shipped broken because AdaptiveSampler stored the rate and never
+// read it, and the only test asserted the sampler returned a non-nil result.
+func TestAdaptiveSamplerKeepsErrorsBelowBaselineEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0),
+		sampling.WithErrorRate(1.0),
+	))
+
+	for i := 0; i < 20; i++ {
+		_, routine := autotel.Start(context.Background(), "routine")
+		routine.End()
+	}
+
+	_, failed := autotel.Start(context.Background(), "failed")
+	failed.SetStatus(codes.Error, "payment declined")
+	failed.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	names := spanNames(exporter)
+	if !contains(names, "failed") {
+		t.Errorf("the error span was dropped despite WithErrorRate(1.0): %v", names)
+	}
+	if contains(names, "routine") {
+		t.Errorf("a zero baseline still exported routine spans: %v", names)
+	}
+}
+
+// A kept error is only useful with the spans it hangs off. Keeping the failed
+// span alone produces a waterfall with the middle missing, which is what an
+// OTLP receiver renders as a root span with a parent that does not exist.
+func TestKeptErrorBringsItsAncestorsEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0), // the parent would be dropped on its own
+		sampling.WithErrorRate(1.0),
+	))
+
+	ctx, parent := autotel.Start(context.Background(), "checkout")
+	_, child := autotel.Start(ctx, "charge-card")
+	child.SetStatus(codes.Error, "card declined")
+	child.End()
+	parent.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	names := spanNames(exporter)
+	for _, want := range []string{"charge-card", "checkout"} {
+		if !contains(names, want) {
+			t.Errorf("span %q missing; a kept error must bring its trace: %v", want, names)
+		}
+	}
+}
+
+// Stickiness must not become "keep everything": a trace that never failed is
+// still subject to the baseline.
+func TestUnrelatedTracesAreNotKeptBySomeoneElsesError(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0),
+		sampling.WithErrorRate(1.0),
+	))
+
+	_, failed := autotel.Start(context.Background(), "failed")
+	failed.SetStatus(codes.Error, "boom")
+	failed.End()
+
+	for i := 0; i < 20; i++ {
+		_, ok := autotel.Start(context.Background(), "healthy")
+		ok.End()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if names := spanNames(exporter); contains(names, "healthy") {
+		t.Errorf("an unrelated trace was kept by another trace's error: %v", names)
+	}
+}
+
+// Slow spans are the other decision a head sampler cannot make, since duration
+// does not exist until the span ends.
+func TestAdaptiveSamplerKeepsSlowSpansEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0),
+		sampling.WithErrorRate(0),
+		sampling.WithSlowThreshold(int64(20*time.Millisecond)),
+		sampling.WithSlowRate(1.0),
+	))
+
+	_, quick := autotel.Start(context.Background(), "quick")
+	quick.End()
+
+	_, slow := autotel.Start(context.Background(), "slow")
+	time.Sleep(30 * time.Millisecond)
+	slow.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	names := spanNames(exporter)
+	if !contains(names, "slow") {
+		t.Errorf("the slow span was dropped despite WithSlowRate(1.0): %v", names)
+	}
+	if contains(names, "quick") {
+		t.Errorf("a fast span was exported under a zero baseline: %v", names)
 	}
 }
 

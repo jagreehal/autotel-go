@@ -29,8 +29,13 @@ func (e *InMemoryExporter) ExportSpans(ctx context.Context, spans []sdktrace.Rea
 }
 
 // Shutdown implements the SpanExporter interface.
+//
+// It deliberately keeps the recorded spans. Shutting down is how a cleanup
+// function flushes the last batch, so discarding here would empty the exporter
+// at the exact moment the spans became complete, and the obvious test — run the
+// code, call cleanup, assert on what was exported — would always see nothing.
+// Call Reset to clear between cases.
 func (e *InMemoryExporter) Shutdown(ctx context.Context) error {
-	e.Reset()
 	return nil
 }
 

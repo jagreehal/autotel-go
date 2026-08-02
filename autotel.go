@@ -23,6 +23,7 @@ import (
 
 	"github.com/jagreehal/autotel-go/v2/internal/exporters"
 	"github.com/jagreehal/autotel-go/v2/processors"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // EventTracker is an interface for tracking analytics events.
@@ -177,8 +178,9 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 		return nil, err
 	}
 
-	processors := buildSpanProcessors(exportersList, cfg)
-	sampler := selectSampler(cfg)
+	tailPolicy := endPolicyFor(cfg)
+	processors := buildSpanProcessors(exportersList, cfg, tailPolicy)
+	sampler := selectSampler(cfg, tailPolicy != nil)
 
 	providerOpts := []trace.TracerProviderOption{
 		trace.WithResource(res),
@@ -197,7 +199,7 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 //
 // The baggage stage sits outermost because it writes attributes in OnStart,
 // which has to happen before any stage that inspects them.
-func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.SpanProcessor {
+func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config, tailPolicy processors.TailPolicy) []trace.SpanProcessor {
 	out := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
 	out = append(out, cfg.SpanProcessors...)
 
@@ -207,8 +209,12 @@ func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.Sp
 			trace.WithMaxQueueSize(cfg.MaxQueueSize),
 			trace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
 		)
-		if cfg.TailSamplingEnabled {
-			p = processors.NewTailSamplingSpanProcessor(p)
+		if cfg.TailSamplingEnabled || tailPolicy != nil {
+			var opts []processors.TailSamplingOption
+			if tailPolicy != nil {
+				opts = append(opts, processors.WithTailPolicy(tailPolicy))
+			}
+			p = processors.NewTailSamplingSpanProcessor(p, opts...)
 		}
 		if cfg.SpanFilter != nil {
 			p = processors.NewFilteringSpanProcessor(cfg.SpanFilter, p)
@@ -221,10 +227,41 @@ func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.Sp
 	return out
 }
 
+// endPolicyFor returns the tail policy implied by the configured sampler, or nil
+// when every decision it makes can be made at span start.
+//
+// Keeping all errors is not something a head sampler can do: a span's status and
+// duration do not exist when it starts. Those rates therefore travel to a span
+// processor that runs at OnEnd, where the facts are in.
+func endPolicyFor(cfg *Config) processors.TailPolicy {
+	adaptive, ok := cfg.Sampler.(*sampling.AdaptiveSampler)
+	if !ok {
+		return nil
+	}
+	policy := adaptive.EndPolicy()
+	if !policy.Active() {
+		return nil
+	}
+	// The keeper is stateful: it remembers which traces kept a failed span so the
+	// parents that end afterwards are kept with it, rather than leaving the error
+	// as an orphan with no waterfall around it.
+	return policy.NewKeeper().KeepSpan
+}
+
 // selectSampler returns the appropriate sampler based on config and debug mode.
-func selectSampler(cfg *Config) trace.Sampler {
+//
+// When a tail policy is in play the head must record every span, because a span
+// dropped at head never reaches OnEnd and its error can no longer be kept. The
+// baseline is not lost: the tail applies it, deterministically per trace ID. The
+// cost is that spans are built in-process before being dropped; export volume
+// still follows the configured rates.
+func selectSampler(cfg *Config, hasTailPolicy bool) trace.Sampler {
 	if IsDebugEnabled() {
 		debugPrint("Using AlwaysSample sampler for debug mode")
+		return trace.AlwaysSample()
+	}
+	if hasTailPolicy {
+		debugPrint("Head sampling everything; the tail policy applies the configured rates")
 		return trace.AlwaysSample()
 	}
 	return cfg.Sampler

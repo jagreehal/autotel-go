@@ -1,6 +1,8 @@
 package sampling
 
 import (
+	"time"
+
 	"go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
@@ -27,7 +29,12 @@ func WithBaselineRate(rate float64) AdaptiveSamplerOption {
 	}
 }
 
-// WithErrorRate sets the error sampling rate (default 1.0 = 100%).
+// WithErrorRate sets the keep rate for spans that end with an Error status
+// (default 1.0 = 100%).
+//
+// A span's status is not known when it starts, so this is applied at OnEnd by
+// the tail processor autotel.Init installs, not by ShouldSample. Building a
+// TracerProvider directly from this sampler leaves it unenforced.
 func WithErrorRate(rate float64) AdaptiveSamplerOption {
 	return func(s *AdaptiveSampler) {
 		if rate >= 0 && rate <= 1 {
@@ -37,13 +44,17 @@ func WithErrorRate(rate float64) AdaptiveSamplerOption {
 }
 
 // WithSlowThreshold sets the slow operation threshold in nanoseconds.
+//
+// Duration is only known once a span ends, so this is applied at OnEnd by the
+// tail processor autotel.Init installs. See WithErrorRate.
 func WithSlowThreshold(thresholdNano int64) AdaptiveSamplerOption {
 	return func(s *AdaptiveSampler) {
 		s.slowThresholdNano = thresholdNano
 	}
 }
 
-// WithSlowRate sets the slow operation sampling rate (default 1.0 = 100%).
+// WithSlowRate sets the keep rate for spans at or above the slow threshold
+// (default 1.0 = 100%). Applied at OnEnd; see WithErrorRate.
 func WithSlowRate(rate float64) AdaptiveSamplerOption {
 	return func(s *AdaptiveSampler) {
 		if rate >= 0 && rate <= 1 {
@@ -73,6 +84,12 @@ func WithLinksRate(rate float64) AdaptiveSamplerOption {
 }
 
 // NewAdaptiveSampler creates a new adaptive sampler.
+//
+// The sampler is one half of the configuration. The baseline and links rates are
+// decided at span start and enforced here; the error and latency rates depend on
+// how a span finished and are enforced by a tail processor. autotel.Init reads
+// EndPolicy and wires that half automatically. Pass this sampler to a
+// TracerProvider yourself and only the head half applies.
 func NewAdaptiveSampler(opts ...AdaptiveSamplerOption) trace.Sampler {
 	s := &AdaptiveSampler{
 		baselineRate:      0.1,   // 10%
@@ -88,6 +105,18 @@ func NewAdaptiveSampler(opts ...AdaptiveSamplerOption) trace.Sampler {
 	}
 
 	return s
+}
+
+// EndPolicy returns the half of this sampler's configuration that can only be
+// applied once a span has ended. autotel.Init uses it to install the matching
+// tail processor.
+func (s *AdaptiveSampler) EndPolicy() EndPolicy {
+	return EndPolicy{
+		BaselineRate:  s.baselineRate,
+		ErrorRate:     s.errorRate,
+		SlowThreshold: time.Duration(s.slowThresholdNano),
+		SlowRate:      s.slowRate,
+	}
 }
 
 // hasSampledLink checks if any of the provided links point to a sampled span.
@@ -140,23 +169,13 @@ func (s *AdaptiveSampler) ShouldSample(p trace.SamplingParameters) trace.Samplin
 // shouldSampleAtRate uses TraceID to make deterministic sampling decision at a given rate.
 // This ensures all spans in a trace have the same decision for consistency.
 func (s *AdaptiveSampler) shouldSampleAtRate(traceID oteltrace.TraceID, rate float64) bool {
-	// Handle edge cases: always sample at 100%, never sample at 0%
-	if rate >= 1.0 {
-		return true
-	}
-	if rate <= 0.0 {
-		return false
-	}
-
-	tid := traceID[15] // Use last byte for deterministic decision
-	threshold := uint8(rate * 256)
-	return tid < threshold
+	return keepAtRate(traceID, rate)
 }
 
 // shouldSampleBaseline uses TraceID to make deterministic sampling decision.
 // This ensures all spans in a trace have the same decision.
 func (s *AdaptiveSampler) shouldSampleBaseline(traceID oteltrace.TraceID) bool {
-	return s.shouldSampleAtRate(traceID, s.baselineRate)
+	return keepAtRate(traceID, s.baselineRate)
 }
 
 // Description returns sampler description.

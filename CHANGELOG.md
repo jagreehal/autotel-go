@@ -4,6 +4,65 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-02
+
+### Added
+
+- **`sampling.NewTargetRateSampler` and `autotel.WithTargetRateSampler`** hold a
+  budget of traces per second instead of a fixed fraction, recomputing the keep
+  rate from the volume actually observed. A fixed rate has to be re-tuned by hand
+  whenever traffic moves; a budget does not. `WithSamplingKey` applies the budget
+  per key so one noisy endpoint cannot spend the allowance a rare one needs, and
+  `KeyByAttributes` builds that key from span attributes. Keys are discovered
+  from traffic rather than enumerated in advance, and `WithMaxSamplingKeys`
+  bounds the tracked set — an unbounded key degrades into inaccuracy rather than
+  memory exhaustion. The rate in force is computed from the previous interval, so
+  a traffic change takes one interval to be reflected.
+
+  This closes rungs 5, 7 and 8 of the chapter 15 sampling ladder in
+  _Observability Engineering_, which the library previously could not climb.
+
+### Fixed
+
+- **`sampling.WithErrorRate`, `WithSlowThreshold` and `WithSlowRate` had no
+  effect.** `AdaptiveSampler` stored all three and never read them:
+  `ShouldSample` consulted only the parent decision, links, and the baseline
+  rate. A service configured with a 10% baseline and `WithErrorRate(1.0)` — the
+  configuration the README recommends — dropped 90% of its errors. Present since
+  the options were introduced, and invisible to the test suite because
+  `TestAdaptiveSampler_Options` asserted only that the sampler returned a
+  non-nil result.
+
+  These decisions cannot be made where they were being configured. A head
+  sampler runs when a span starts, and neither the status nor the duration
+  exists yet. The rates now travel to a span processor that runs at `OnEnd`:
+  `AdaptiveSampler.EndPolicy()` exposes them, `processors.WithTailPolicy`
+  applies them, and `Init` wires the two halves together.
+
+- **A span kept for failing now brings its ancestors with it.** Keeping the
+  failed span alone left it as an orphan: an OTLP receiver renders that as a root
+  span whose parent does not exist, and the trace you opened is missing the part
+  you came for — the exact failure chapter 15 of _Observability Engineering_
+  warns about. A trace that keeps a failed or slow span is now marked, so spans
+  ending after it are kept too. Since a child always ends before its parent, that
+  covers the ancestor chain. A sibling that ended before the failure is already
+  gone; a tail decision cannot travel backwards. The marks are bounded to 10,000
+  traces and expire after five minutes.
+
+### Changed
+
+- **Configuring an error or latency rate now records every span in-process.** A
+  span dropped at head never reaches `OnEnd`, so its error cannot be kept; the
+  head must see everything for the tail to have anything to decide. The baseline
+  is applied at the tail instead, still derived from the trace ID so a routine
+  trace is kept or dropped whole. Export volume is unchanged — it follows the
+  configured rates — but spans are now built before being dropped locally. This
+  applies to the default configuration, which pairs a 10% baseline with
+  `ErrorRate: 1.0`. Set the error and slow rates no higher than the baseline to
+  restore head-only sampling.
+- `processors.NewTailSamplingSpanProcessor` accepts options. An explicit
+  `sampling.tail.keep` attribute still wins over any configured policy.
+
 ## [2.1.0] - 2026-08-01
 
 ### Fixed

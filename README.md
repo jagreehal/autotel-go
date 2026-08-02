@@ -667,6 +667,26 @@ links := sampling.ExtractLinksFromBatch(messages, func(m Message) map[string]str
 })
 ```
 
+### Local development with autotel-devtools
+
+[`autotel-devtools`](https://www.npmjs.com/package/autotel-devtools) is a local
+OTLP receiver with a web UI. `backends.Collector` already points at it, so there
+is nothing to configure:
+
+```sh
+npx autotel-devtools    # listens on http://localhost:4318
+```
+
+```go
+cleanup, err := autotel.Init(ctx,
+    backends.Collector(backends.CollectorConfig{Service: "my-service"}),
+)
+```
+
+Open <http://localhost:4318> and traces appear as they are exported. The receiver
+accepts OTLP over HTTP in both protobuf and JSON, and the Go SDK sends protobuf
+by default, so no environment variables are needed.
+
 ## Advanced Features
 
 ### SLO tracking and burn-rate forecasting
@@ -818,6 +838,45 @@ cleanup, err := autotel.Init(ctx,
     ),
 )
 ```
+
+The baseline is decided when a span starts, from its trace ID, so a routine trace
+is kept or dropped whole rather than arriving with holes in it.
+
+Errors and slow spans cannot be decided there: neither status nor duration exists
+yet. `Init` therefore records every span in-process and applies these rates when
+the span ends, which is the only point at which "keep every error" can mean
+anything. Export volume still follows the rates you set; the cost is building
+spans that are then dropped locally. Set `WithErrorRate` and `WithSlowRate` no
+higher than the baseline to opt out and decide everything at head.
+
+A span kept for failing may be the only survivor of an otherwise dropped trace —
+a tail decision cannot be propagated back to spans that already ended.
+
+### Target-Rate Sampling
+
+Keep a budget of traces per second instead of a fixed fraction, so nobody re-tunes
+a rate when traffic moves:
+
+```go
+cleanup, err := autotel.Init(ctx,
+    autotel.WithService("my-service"),
+    autotel.WithTargetRateSampler(
+        sampling.WithTargetSpansPerSecond(10),
+        // Optional: apply the budget per route, so one noisy endpoint cannot
+        // spend the allowance a rare one needs.
+        sampling.WithSamplingKey(sampling.KeyByAttributes("http.route")),
+    ),
+)
+```
+
+The rate is recomputed from observed volume once a minute (`WithAdjustInterval`),
+so a change in traffic takes one interval to be reflected. Keys are discovered
+from traffic rather than enumerated in advance, and the tracked set is bounded by
+`WithMaxSamplingKeys` so an unbounded key degrades into inaccuracy rather than
+memory exhaustion.
+
+This decides at span start, so it cannot account for errors or latency — see
+Adaptive Sampling above for those.
 
 ### Rate Limiting
 
@@ -1034,13 +1093,13 @@ if autotel.IsTracingEnabled(ctx) {
 
 Production ready. All core features implemented and tested.
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 **Go:** 1.25+ (Go 1.26.5 toolchain recommended)
 **License:** MIT
 
 ## Version
 
-Current version: `v2.1.0`
+Current version: `v2.2.0`
 
 ```go
 import "github.com/jagreehal/autotel-go/v2"
