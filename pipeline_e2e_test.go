@@ -157,6 +157,55 @@ func TestAdaptiveSamplerKeepsErrorsBelowBaselineEndToEnd(t *testing.T) {
 	}
 }
 
+// A kept error is only useful with the spans it hangs off. Keeping the failed
+// span alone produces a waterfall with the middle missing, which is what an
+// OTLP receiver renders as a root span with a parent that does not exist.
+func TestKeptErrorBringsItsAncestorsEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0), // the parent would be dropped on its own
+		sampling.WithErrorRate(1.0),
+	))
+
+	ctx, parent := autotel.Start(context.Background(), "checkout")
+	_, child := autotel.Start(ctx, "charge-card")
+	child.SetStatus(codes.Error, "card declined")
+	child.End()
+	parent.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	names := spanNames(exporter)
+	for _, want := range []string{"charge-card", "checkout"} {
+		if !contains(names, want) {
+			t.Errorf("span %q missing; a kept error must bring its trace: %v", want, names)
+		}
+	}
+}
+
+// Stickiness must not become "keep everything": a trace that never failed is
+// still subject to the baseline.
+func TestUnrelatedTracesAreNotKeptBySomeoneElsesError(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithAdaptiveSampler(
+		sampling.WithBaselineRate(0),
+		sampling.WithErrorRate(1.0),
+	))
+
+	_, failed := autotel.Start(context.Background(), "failed")
+	failed.SetStatus(codes.Error, "boom")
+	failed.End()
+
+	for i := 0; i < 20; i++ {
+		_, ok := autotel.Start(context.Background(), "healthy")
+		ok.End()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if names := spanNames(exporter); contains(names, "healthy") {
+		t.Errorf("an unrelated trace was kept by another trace's error: %v", names)
+	}
+}
+
 // Slow spans are the other decision a head sampler cannot make, since duration
 // does not exist until the span ends.
 func TestAdaptiveSamplerKeepsSlowSpansEndToEnd(t *testing.T) {

@@ -667,6 +667,26 @@ links := sampling.ExtractLinksFromBatch(messages, func(m Message) map[string]str
 })
 ```
 
+### Local development with autotel-devtools
+
+[`autotel-devtools`](https://www.npmjs.com/package/autotel-devtools) is a local
+OTLP receiver with a web UI. `backends.Collector` already points at it, so there
+is nothing to configure:
+
+```sh
+npx autotel-devtools    # listens on http://localhost:4318
+```
+
+```go
+cleanup, err := autotel.Init(ctx,
+    backends.Collector(backends.CollectorConfig{Service: "my-service"}),
+)
+```
+
+Open <http://localhost:4318> and traces appear as they are exported. The receiver
+accepts OTLP over HTTP in both protobuf and JSON, and the Go SDK sends protobuf
+by default, so no environment variables are needed.
+
 ## Advanced Features
 
 ### SLO tracking and burn-rate forecasting

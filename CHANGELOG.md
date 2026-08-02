@@ -21,6 +21,16 @@ All notable changes to this project will be documented in this file.
   `AdaptiveSampler.EndPolicy()` exposes them, `processors.WithTailPolicy`
   applies them, and `Init` wires the two halves together.
 
+- **A span kept for failing now brings its ancestors with it.** Keeping the
+  failed span alone left it as an orphan: an OTLP receiver renders that as a root
+  span whose parent does not exist, and the trace you opened is missing the part
+  you came for — the exact failure chapter 15 of _Observability Engineering_
+  warns about. A trace that keeps a failed or slow span is now marked, so spans
+  ending after it are kept too. Since a child always ends before its parent, that
+  covers the ancestor chain. A sibling that ended before the failure is already
+  gone; a tail decision cannot travel backwards. The marks are bounded to 10,000
+  traces and expire after five minutes.
+
 ### Changed
 
 - **Configuring an error or latency rate now records every span in-process.** A

@@ -242,7 +242,10 @@ func endPolicyFor(cfg *Config) processors.TailPolicy {
 	if !policy.Active() {
 		return nil
 	}
-	return policy.KeepSpan
+	// The keeper is stateful: it remembers which traces kept a failed span so the
+	// parents that end afterwards are kept with it, rather than leaving the error
+	// as an orphan with no waterfall around it.
+	return policy.NewKeeper().KeepSpan
 }
 
 // selectSampler returns the appropriate sampler based on config and debug mode.
