@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`sampling.NewTargetRateSampler` and `autotel.WithTargetRateSampler`** hold a
+  budget of traces per second instead of a fixed fraction, recomputing the keep
+  rate from the volume actually observed. A fixed rate has to be re-tuned by hand
+  whenever traffic moves; a budget does not. `WithSamplingKey` applies the budget
+  per key so one noisy endpoint cannot spend the allowance a rare one needs, and
+  `KeyByAttributes` builds that key from span attributes. Keys are discovered
+  from traffic rather than enumerated in advance, and `WithMaxSamplingKeys`
+  bounds the tracked set — an unbounded key degrades into inaccuracy rather than
+  memory exhaustion. The rate in force is computed from the previous interval, so
+  a traffic change takes one interval to be reflected.
+
+  This closes rungs 5, 7 and 8 of the chapter 15 sampling ladder in
+  _Observability Engineering_, which the library previously could not climb.
+
 ### Fixed
 
 - **`sampling.WithErrorRate`, `WithSlowThreshold` and `WithSlowRate` had no

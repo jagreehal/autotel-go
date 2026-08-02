@@ -110,6 +110,32 @@ func WithAdaptiveSampler(opts ...sampling.AdaptiveSamplerOption) Option {
 	}
 }
 
+// WithTargetRateSampler keeps a budget of traces per second instead of a fixed
+// fraction of them, recomputing the rate from the volume actually observed.
+//
+// A fixed rate has to be re-tuned by hand whenever traffic moves. A budget does
+// not: the rate that holds it at midnight also holds it at midday. Add a sampling
+// key and the budget applies per key, so one noisy endpoint cannot spend the
+// allowance that a rare one needs.
+//
+// Example:
+//
+//	autotel.Init(ctx,
+//	    autotel.WithTargetRateSampler(
+//	        sampling.WithTargetSpansPerSecond(10),
+//	        sampling.WithSamplingKey(sampling.KeyByAttributes("http.route")),
+//	    ),
+//	)
+//
+// This decides at span start, so it cannot take account of errors or latency.
+// Pair it with WithAdaptiveSampler's error and slow rates if you need both.
+func WithTargetRateSampler(opts ...sampling.TargetRateOption) Option {
+	return func(c *Config) {
+		c.Sampler = sampling.NewTargetRateSampler(opts...)
+		c.UseAdaptiveSampler = false
+	}
+}
+
 // WithLinksBasedSampling enables links-based sampling for event-driven architectures.
 // When a span is linked to a sampled span (e.g., message consumer linked to producer),
 // it will be sampled at the specified rate to maintain trace continuity.

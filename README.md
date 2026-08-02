@@ -852,6 +852,32 @@ higher than the baseline to opt out and decide everything at head.
 A span kept for failing may be the only survivor of an otherwise dropped trace —
 a tail decision cannot be propagated back to spans that already ended.
 
+### Target-Rate Sampling
+
+Keep a budget of traces per second instead of a fixed fraction, so nobody re-tunes
+a rate when traffic moves:
+
+```go
+cleanup, err := autotel.Init(ctx,
+    autotel.WithService("my-service"),
+    autotel.WithTargetRateSampler(
+        sampling.WithTargetSpansPerSecond(10),
+        // Optional: apply the budget per route, so one noisy endpoint cannot
+        // spend the allowance a rare one needs.
+        sampling.WithSamplingKey(sampling.KeyByAttributes("http.route")),
+    ),
+)
+```
+
+The rate is recomputed from observed volume once a minute (`WithAdjustInterval`),
+so a change in traffic takes one interval to be reflected. Keys are discovered
+from traffic rather than enumerated in advance, and the tracked set is bounded by
+`WithMaxSamplingKeys` so an unbounded key degrades into inaccuracy rather than
+memory exhaustion.
+
+This decides at span start, so it cannot account for errors or latency — see
+Adaptive Sampling above for those.
+
 ### Rate Limiting
 
 ```go

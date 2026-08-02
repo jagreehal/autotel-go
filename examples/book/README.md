@@ -59,11 +59,14 @@ failures per thousand consuming a 99.9% monthly budget in six days, a spike the
 long window correctly refuses to page on, and a deploy whose budget runs out in
 9h43m — inside the 24-hour window, so it pages.
 
-**[ch15-sampling](ch15-sampling)** — the ladder, in the chapter's order, asserted
-against real exported spans. It also states plainly which rungs this library does
-not climb: 5, 7 and 8 all need a rate that adapts to observed volume, and
-autotel's rates are static. An example that quietly skipped them would be
-advertising, not evidence.
+**[ch15-sampling](ch15-sampling)** — all nine rungs, in the chapter's order,
+asserted against real exported spans.
+
+Three of them did not work when this file was first written. Rungs 5, 7 and 8
+need a rate that adapts to observed volume, and the library only had static
+rates, so the example said so plainly rather than skipping them. That gap is now
+closed by `sampling.NewTargetRateSampler`, and the example climbs the ladder to
+the top.
 
 ## Why the assertions matter
 
