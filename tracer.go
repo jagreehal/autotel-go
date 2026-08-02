@@ -40,27 +40,11 @@ func RunInOperationContext[T any](ctx context.Context, name string, fn func(cont
 }
 
 var (
-	globalRateLimiter    interface{ Allow() bool }
-	globalCircuitBreaker interface{ Allow() bool }
-	globalPIIRedactor    interface {
+	globalPIIRedactor interface {
 		Redact(key, value string) string
 	}
 	mu sync.RWMutex
 )
-
-// setGlobalRateLimiter sets the global rate limiter (internal use)
-func setGlobalRateLimiter(rl interface{ Allow() bool }) {
-	mu.Lock()
-	defer mu.Unlock()
-	globalRateLimiter = rl
-}
-
-// setGlobalCircuitBreaker sets the global circuit breaker (internal use)
-func setGlobalCircuitBreaker(cb interface{ Allow() bool }) {
-	mu.Lock()
-	defer mu.Unlock()
-	globalCircuitBreaker = cb
-}
 
 // setGlobalPIIRedactor sets the global PII redactor (internal use)
 func setGlobalPIIRedactor(pr interface {
@@ -83,27 +67,15 @@ func setGlobalPIIRedactor(pr interface {
 //	    span.SetAttribute("user.email", data.Email)
 //	    return db.Users.Create(ctx, data)
 //	}
+//
+// The rate limiter and circuit breaker are not consulted here. They used to be,
+// which meant they only ever covered spans created through this function: spans
+// from middleware/httpclient, messaging, workflow and every third-party
+// instrumentation package went straight to otel.Tracer and skipped both, so a
+// configured limit did not bound the span volume it appeared to bound. Both now
+// run in the sampler, which every span passes through whatever created it. See
+// guardSampler in autotel.go.
 func Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, Span) {
-	// Check rate limiter
-	mu.RLock()
-	rl := globalRateLimiter
-	mu.RUnlock()
-	if rl != nil && !rl.Allow() {
-		// Rate limited - return non-recording span
-		debugPrint("⚠ Rate limited: %s", name)
-		return ctx, &noopSpan{}
-	}
-
-	// Check circuit breaker
-	mu.RLock()
-	cb := globalCircuitBreaker
-	mu.RUnlock()
-	if cb != nil && !cb.Allow() {
-		// Circuit breaker open - return non-recording span
-		debugPrint("⚠ Circuit breaker open: %s", name)
-		return ctx, &noopSpan{}
-	}
-
 	tracer := otel.GetTracerProvider().Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, name, opts...)
 	ctx = context.WithValue(ctx, operationNameKey, name)

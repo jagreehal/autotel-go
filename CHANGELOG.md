@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-02
+
+### Fixed
+
+- **`WithRateLimit` and `WithCircuitBreaker` covered only some of your spans.**
+  Both were checked inside `autotel.Start`, so spans created by
+  `middleware/httpclient`, `messaging`, `workflow` and every third-party
+  instrumentation package went straight to `otel.Tracer` and skipped them. A
+  service configured with a 100/sec limit exported 20 of 20 spans in the test
+  that now covers this. Both now run in the sampler, which every span reaches
+  whatever created it.
+
+  Spans whose parent is already sampled pass the guard, so shedding load drops
+  whole traces rather than leaving holes in the ones it keeps. This changes what
+  the limit counts, from spans created through `Start` to traces started.
+
+- **`WithLinksBasedSampling` stopped working in 2.2.0.** The tail policy
+  introduced in that release re-applied the baseline at `OnEnd` and knew nothing
+  about links, so it dropped the consumer spans the head sampler had deliberately
+  kept. `EndPolicy` now carries the links configuration.
+
+### Removed
+
+- The unexported `noopSpan`, which `Start` returned when the rate limiter or
+  circuit breaker rejected a span. Both now run in the sampler, so nothing
+  constructs it.
+
+### Added
+
+- `TestEveryOptionIsVerifiedSomewhere` parses `options.go` and fails when an
+  option is neither exercised end-to-end nor recorded as verified elsewhere.
+  Three features have shipped doing nothing, and all three passed a test that
+  asserted a value had been set rather than that anything happened. Adding an
+  option now means saying how it is checked. A companion test fails when an
+  entry in either list goes stale.
+
 ## [2.2.0] - 2026-08-02
 
 ### Added

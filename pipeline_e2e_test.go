@@ -5,13 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelbaggage "go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/circuitbreaker"
 	"github.com/jagreehal/autotel-go/v2/processors"
 	"github.com/jagreehal/autotel-go/v2/sampling"
 )
@@ -311,5 +314,167 @@ func TestWithPIIRedactionEndToEnd(t *testing.T) {
 	// Guards against passing vacuously because the attribute was never recorded.
 	if !found {
 		t.Fatal("the email attribute never reached the exporter, so this proves nothing")
+	}
+}
+
+// A configured rate limit has to bound every span, not just the ones created
+// through autotel.Start. When the check lived in Start, a service using
+// middleware, messaging or any third-party instrumentation had a limit that
+// bounded almost nothing.
+func TestRateLimitCoversSpansFromAnySourceEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithRateLimit(3, 3))
+
+	// Deliberately not autotel.Start: this is how otelhttp, messaging and every
+	// contrib instrumentation package creates spans.
+	tracer := otel.Tracer("third-party-instrumentation")
+	for i := 0; i < 20; i++ {
+		_, span := tracer.Start(context.Background(), "external")
+		span.End()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := len(exporter.GetSpans())
+	if got > 3 {
+		t.Errorf("a limit of 3/sec exported %d spans created outside autotel.Start", got)
+	}
+	if got == 0 {
+		t.Error("the limit dropped everything; the burst of 3 should have passed")
+	}
+}
+
+// Shedding load must not shred the traces it keeps. A span whose parent is
+// already sampled passes the guard, so a kept trace arrives whole.
+func TestRateLimitDoesNotSplitAKeptTraceEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithRateLimit(1, 1))
+
+	ctx, parent := autotel.Start(context.Background(), "root")
+	for i := 0; i < 5; i++ {
+		_, child := autotel.Start(ctx, "child")
+		child.End()
+	}
+	parent.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if got := len(exporter.GetSpans()); got != 6 {
+		t.Errorf("kept trace arrived with %d of its 6 spans: %v", got, spanNames(exporter))
+	}
+}
+
+// An open circuit breaker stops spans from every source too.
+func TestCircuitBreakerCoversSpansFromAnySourceEndToEnd(t *testing.T) {
+	// A closed breaker configured the normal way must not block anything.
+	open := initWithExporter(t, autotel.WithCircuitBreaker(5, 1, time.Minute))
+	_, allowed := autotel.Start(context.Background(), "allowed")
+	allowed.End()
+	time.Sleep(150 * time.Millisecond)
+	if len(open.GetSpans()) == 0 {
+		t.Error("a closed breaker dropped spans")
+	}
+
+	// Tripping it needs a breaker this test holds, so it is built directly.
+	breaker := circuitbreaker.NewCircuitBreaker(1, 1, time.Minute)
+	breaker.RecordFailure()
+
+	exporter := initWithExporter(t, func(c *autotel.Config) { c.CircuitBreaker = breaker })
+
+	tracer := otel.Tracer("third-party-instrumentation")
+	_, span := tracer.Start(context.Background(), "external")
+	span.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if got := len(exporter.GetSpans()); got != 0 {
+		t.Errorf("an open breaker exported %d spans", got)
+	}
+}
+
+// A consumer span linked to a sampled producer should survive, so an
+// event-driven trace does not lose its second half.
+func TestWithLinksBasedSamplingKeepsLinkedSpansEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t, autotel.WithLinksBasedSampling(1.0))
+
+	sampled := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{9},
+		SpanID:     oteltrace.SpanID{9},
+		TraceFlags: oteltrace.FlagsSampled,
+	})
+
+	_, consumer := autotel.Start(context.Background(), "consumer",
+		oteltrace.WithLinks(oteltrace.Link{SpanContext: sampled}))
+	consumer.End()
+
+	time.Sleep(150 * time.Millisecond)
+
+	if names := spanNames(exporter); !contains(names, "consumer") {
+		t.Errorf("a span linked to a sampled producer was dropped: %v", names)
+	}
+}
+
+// The budget has to bind once the sampler has measured a window of traffic.
+func TestWithTargetRateSamplerBindsAfterMeasuringEndToEnd(t *testing.T) {
+	now := time.Unix(0, 0)
+	exporter := initWithExporter(t, autotel.WithTargetRateSampler(
+		sampling.WithTargetSpansPerSecond(1),
+		sampling.WithAdjustInterval(time.Minute),
+		sampling.WithTargetRateClock(func() time.Time { return now }),
+	))
+
+	// Nothing measured yet, so the first window keeps everything.
+	for i := 0; i < 200; i++ {
+		_, span := autotel.Start(context.Background(), "first")
+		span.End()
+	}
+	now = now.Add(time.Minute)
+	for i := 0; i < 200; i++ {
+		_, span := autotel.Start(context.Background(), "second")
+		span.End()
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var first, second int
+	for _, name := range spanNames(exporter) {
+		switch name {
+		case "first":
+			first++
+		case "second":
+			second++
+		}
+	}
+	if first != 200 {
+		t.Errorf("first window kept %d/200; with nothing measured it keeps all", first)
+	}
+	// 200 a minute is 3.3/s against a budget of 1/s, so roughly a third survives.
+	if second == 0 || second >= 200 {
+		t.Errorf("second window kept %d/200; the budget should bind without emptying", second)
+	}
+}
+
+// Identity reaches the exporter as resource attributes, or a backend cannot tell
+// two deployments of the same service apart.
+func TestServiceVersionAndEnvironmentReachTheExporterEndToEnd(t *testing.T) {
+	exporter := initWithExporter(t,
+		autotel.WithServiceVersion("4.5.6"),
+		autotel.WithEnvironment("staging"),
+	)
+
+	_, span := autotel.Start(context.Background(), "identified")
+	span.End()
+	time.Sleep(150 * time.Millisecond)
+
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("no spans exported")
+	}
+	got := map[string]string{}
+	for _, attr := range spans[0].Resource.Attributes() {
+		got[string(attr.Key)] = attr.Value.String()
+	}
+	if got["service.version"] != "4.5.6" {
+		t.Errorf("service.version = %q, want 4.5.6", got["service.version"])
+	}
+	if got["deployment.environment"] != "staging" {
+		t.Errorf("deployment.environment = %q, want staging", got["deployment.environment"])
 	}
 }
