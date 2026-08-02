@@ -819,6 +819,19 @@ cleanup, err := autotel.Init(ctx,
 )
 ```
 
+The baseline is decided when a span starts, from its trace ID, so a routine trace
+is kept or dropped whole rather than arriving with holes in it.
+
+Errors and slow spans cannot be decided there: neither status nor duration exists
+yet. `Init` therefore records every span in-process and applies these rates when
+the span ends, which is the only point at which "keep every error" can mean
+anything. Export volume still follows the rates you set; the cost is building
+spans that are then dropped locally. Set `WithErrorRate` and `WithSlowRate` no
+higher than the baseline to opt out and decide everything at head.
+
+A span kept for failing may be the only survivor of an otherwise dropped trace —
+a tail decision cannot be propagated back to spans that already ended.
+
 ### Rate Limiting
 
 ```go

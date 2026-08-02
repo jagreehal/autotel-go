@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sampling.WithErrorRate`, `WithSlowThreshold` and `WithSlowRate` had no
+  effect.** `AdaptiveSampler` stored all three and never read them:
+  `ShouldSample` consulted only the parent decision, links, and the baseline
+  rate. A service configured with a 10% baseline and `WithErrorRate(1.0)` — the
+  configuration the README recommends — dropped 90% of its errors. Present since
+  the options were introduced, and invisible to the test suite because
+  `TestAdaptiveSampler_Options` asserted only that the sampler returned a
+  non-nil result.
+
+  These decisions cannot be made where they were being configured. A head
+  sampler runs when a span starts, and neither the status nor the duration
+  exists yet. The rates now travel to a span processor that runs at `OnEnd`:
+  `AdaptiveSampler.EndPolicy()` exposes them, `processors.WithTailPolicy`
+  applies them, and `Init` wires the two halves together.
+
+### Changed
+
+- **Configuring an error or latency rate now records every span in-process.** A
+  span dropped at head never reaches `OnEnd`, so its error cannot be kept; the
+  head must see everything for the tail to have anything to decide. The baseline
+  is applied at the tail instead, still derived from the trace ID so a routine
+  trace is kept or dropped whole. Export volume is unchanged — it follows the
+  configured rates — but spans are now built before being dropped locally. This
+  applies to the default configuration, which pairs a 10% baseline with
+  `ErrorRate: 1.0`. Set the error and slow rates no higher than the baseline to
+  restore head-only sampling.
+- `processors.NewTailSamplingSpanProcessor` accepts options. An explicit
+  `sampling.tail.keep` attribute still wins over any configured policy.
+
 ## [2.1.0] - 2026-08-01
 
 ### Fixed
