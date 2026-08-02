@@ -48,6 +48,16 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      # The book examples assert the concepts they demonstrate and exit non-zero
+      # when one stops holding, so a regression surfaces as a chapter that no
+      # longer works rather than as prose that quietly went stale.
+      - name: Run the Observability Engineering examples
+        run: |
+          for dir in examples/book/*/; do
+            echo "--- $dir"
+            go run "./$dir" || exit 1
+          done
+
       - name: Upload coverage
         if: matrix.go-version == '1.26.x'
         uses: codecov/codecov-action@v7
