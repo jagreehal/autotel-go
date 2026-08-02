@@ -31,3 +31,5 @@ build/
 # Linting and formatting tool caches
 golangci-lint.cache
 .DS_Store
+# Local drafts and scratch work, deliberately not published
+.local/
