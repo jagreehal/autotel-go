@@ -31,12 +31,11 @@ import (
 // at the old, more generous rate until the next adjustment; shorten the interval
 // to react faster, at the cost of noisier rates on low traffic.
 type TargetRateSampler struct {
-	perSecond   float64
-	interval    time.Duration
-	key         func(sdktrace.SamplingParameters) string
-	clock       func() time.Time
-	maxKeys     int
-	description string
+	perSecond float64
+	interval  time.Duration
+	key       func(sdktrace.SamplingParameters) string
+	clock     func() time.Time
+	maxKeys   int
 
 	mu           sync.Mutex
 	counts       map[string]int64
@@ -111,7 +110,7 @@ func KeyByAttributes(keys ...string) func(sdktrace.SamplingParameters) string {
 			value := ""
 			for _, attr := range p.Attributes {
 				if string(attr.Key) == want {
-					value = attr.Value.Emit()
+					value = attr.Value.String()
 					break
 				}
 			}
