@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	"github.com/jagreehal/autotel-go/v2"
 	"github.com/jagreehal/autotel-go/v2/backends"
 )
@@ -55,14 +58,44 @@ func TestHoneycomb(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"x-honeycomb-team":       "hcaik_test",
-		"x-honeycomb-dataset":    "production",
-		"x-honeycomb-samplerate": "10",
+		"x-honeycomb-team":    "hcaik_test",
+		"x-honeycomb-dataset": "production",
 	}
 	for k, v := range want {
 		if cfg.Headers[k] != v {
 			t.Errorf("header %s = %q, want %q", k, cfg.Headers[k], v)
 		}
+	}
+	if got := cfg.ResourceAttributes["SampleRate"]; got != "10" {
+		t.Errorf("SampleRate resource attribute = %q, want %q", got, "10")
+	}
+	if cfg.UseAdaptiveSampler {
+		t.Error("Honeycomb sampling must replace the adaptive sampler")
+	}
+	if _, ok := cfg.Headers["x-honeycomb-samplerate"]; ok {
+		t.Error("the Events API sample-rate header must not be used for OTLP")
+	}
+}
+
+func TestHoneycombSampleRateControlsHeadSampling(t *testing.T) {
+	cfg := apply(backends.Honeycomb(backends.HoneycombConfig{
+		APIKey: "k", Service: "s", SampleRate: 1,
+	}))
+
+	result := cfg.Sampler.ShouldSample(trace.SamplingParameters{
+		TraceID: oteltrace.TraceID{1},
+	})
+	if result.Decision != trace.RecordAndSample {
+		t.Errorf("SampleRate 1 decision = %v, want RecordAndSample", result.Decision)
+	}
+}
+
+func TestHoneycombRejectsNegativeSampleRate(t *testing.T) {
+	msg := applyErr(t, backends.Honeycomb(backends.HoneycombConfig{
+		APIKey: "k", Service: "s", SampleRate: -1,
+	}))
+	if !strings.Contains(msg, "sample rate") {
+		t.Errorf("got %q", msg)
 	}
 }
 
@@ -231,6 +264,21 @@ func TestLogfireRejectsUnknownRegion(t *testing.T) {
 	}
 }
 
+func TestLogfireSelfHostedEndpointDoesNotRequireCloudRegion(t *testing.T) {
+	cfg := apply(backends.Logfire(backends.LogfireConfig{
+		WriteToken: "t",
+		Service:    "s",
+		Endpoint:   "https://logfire.internal",
+	}))
+
+	if errs := cfg.OptionErrors(); len(errs) != 0 {
+		t.Fatalf("self-hosted endpoint must not require a cloud region: %v", errs)
+	}
+	if cfg.Endpoint != "https://logfire.internal" {
+		t.Errorf("endpoint = %q", cfg.Endpoint)
+	}
+}
+
 func TestLangfuse(t *testing.T) {
 	cfg := apply(backends.Langfuse(backends.LangfuseConfig{
 		PublicKey: "pk-lf-1",
@@ -339,6 +387,17 @@ func TestCollectorHTTPSTurnsOffInsecure(t *testing.T) {
 
 	if cfg.Insecure {
 		t.Error("an https collector must not be insecure")
+	}
+}
+
+func TestCollectorGRPCUsesGRPCDefaultPort(t *testing.T) {
+	cfg := apply(backends.Collector(backends.CollectorConfig{
+		Service:  "s",
+		Protocol: autotel.ProtocolGRPC,
+	}))
+
+	if cfg.Endpoint != "http://localhost:4317" {
+		t.Errorf("endpoint = %q, want the OTLP/gRPC default", cfg.Endpoint)
 	}
 }
 

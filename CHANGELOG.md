@@ -8,6 +8,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`backends.HoneycombConfig.SampleRate` had no effect.** It was sent as the
+  `x-honeycomb-samplerate` header, which belongs to the Events API and is ignored
+  on the OTLP endpoint, so a service configured to keep 1 in 10 spans exported
+  all of them at full cost. The rate now configures a real SDK head sampler
+  (`ParentBased(TraceIDRatioBased(1/rate))`) and is reported to Honeycomb as the
+  `SampleRate` resource attribute so counts are reweighted. A negative rate is
+  now rejected at startup instead of producing an invalid sampling ratio.
+- `backends.Logfire` accepts a self-hosted `Endpoint` without a cloud `Region`.
+  The region check ran unconditionally, so an on-premises install could not be
+  configured at all.
+- `backends.Collector` defaults to `http://localhost:4317` when `Protocol` is
+  gRPC. It always defaulted to the HTTP port 4318, so a gRPC collector preset
+  with no explicit endpoint failed to connect.
 - **`WithEndpoint` now accepts a URL.** `otlptracehttp.WithEndpoint` stores its
   argument verbatim as the host, so the `http://host:port` form used by the README,
   QUICKSTART, and six of the eight shipped examples produced a mangled target
@@ -92,6 +105,16 @@ All notable changes to this project will be documented in this file.
   which referenced local developer paths and claimed tests that did not exist.
 
 ### Added
+
+- **Typed vendor presets** (`backends/`): `Honeycomb`, `Datadog`, `Grafana`,
+  `Logfire`, `Langfuse`, `PostHog`, and `Collector` return a single
+  `autotel.Option` carrying the endpoint, protocol, TLS setting, and auth
+  headers each vendor expects. Missing credentials or a missing service name
+  fail at `Init` rather than exporting into the void, and `ParseHeaders` reads
+  the `OTEL_EXPORTER_OTLP_HEADERS` format.
+- **`WithBaggageAttributes`** copies baggage entries onto spans as attributes via
+  a span processor, with allow-listing and prefixing options from
+  `processors.BaggageSpanProcessorOption`.
 
 - **SLO tracking and burn-rate alerts** (`slo/`):
   - Rolling-window good/bad event tracking with SLI and error-budget snapshots

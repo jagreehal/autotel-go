@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	"github.com/jagreehal/autotel-go/v2"
 )
 
@@ -90,6 +92,9 @@ func Honeycomb(cfg HoneycombConfig) autotel.Option {
 	if cfg.Service == "" {
 		return invalid("backends: Honeycomb requires a service name")
 	}
+	if cfg.SampleRate < 0 {
+		return invalid("backends: Honeycomb sample rate cannot be negative")
+	}
 
 	endpoint := cfg.Endpoint
 	if endpoint == "" {
@@ -100,17 +105,32 @@ func Honeycomb(cfg HoneycombConfig) autotel.Option {
 	if cfg.Dataset != "" {
 		headers["x-honeycomb-dataset"] = cfg.Dataset
 	}
-	if cfg.SampleRate > 0 {
-		headers["x-honeycomb-samplerate"] = strconv.Itoa(cfg.SampleRate)
-	}
-
-	return compose(
+	opts := []autotel.Option{
 		identity(cfg.Service, cfg.Environment, cfg.Version),
 		autotel.WithProtocol(autotel.ProtocolGRPC),
 		autotel.WithEndpoint(endpoint),
 		autotel.WithInsecure(false),
 		autotel.WithHeaders(headers),
-	)
+	}
+	if cfg.SampleRate > 0 {
+		opts = append(opts, honeycombSampling(cfg.SampleRate))
+	}
+
+	return compose(opts...)
+}
+
+// honeycombSampling configures real SDK head sampling and tells Honeycomb how
+// to reweight the sampled spans. x-honeycomb-samplerate is an Events API header
+// and does not control an OTLP SDK sampler.
+func honeycombSampling(sampleRate int) autotel.Option {
+	return func(c *autotel.Config) {
+		if c.ResourceAttributes == nil {
+			c.ResourceAttributes = make(map[string]string)
+		}
+		c.ResourceAttributes["SampleRate"] = strconv.Itoa(sampleRate)
+		c.Sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(1 / float64(sampleRate)))
+		c.UseAdaptiveSampler = false
+	}
 }
 
 // --- Datadog -----------------------------------------------------------------
@@ -274,8 +294,8 @@ type LogfireConfig struct {
 	WriteToken string
 	// Service names the service (required).
 	Service string
-	// Region is required: a token issued in one region is not valid in the other,
-	// and guessing silently sends data to the wrong continent.
+	// Region is required unless Endpoint is set: a token issued in one region is
+	// not valid in the other, and guessing silently sends data to the wrong continent.
 	Region LogfireRegion
 	// Environment is the deployment environment.
 	Environment string
@@ -293,7 +313,7 @@ func Logfire(cfg LogfireConfig) autotel.Option {
 	if cfg.Service == "" {
 		return invalid("backends: Logfire requires a service name")
 	}
-	if cfg.Region == "" {
+	if cfg.Endpoint == "" && cfg.Region == "" {
 		return invalid("backends: Logfire region is required (%q or %q); a token is region-specific",
 			LogfireUS, LogfireEU)
 	}
@@ -491,12 +511,16 @@ func Collector(cfg CollectorConfig) autotel.Option {
 	}
 
 	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		endpoint = "http://localhost:4318"
-	}
 	protocol := cfg.Protocol
 	if protocol == "" {
 		protocol = autotel.ProtocolHTTP
+	}
+	if endpoint == "" {
+		if protocol == autotel.ProtocolGRPC {
+			endpoint = "http://localhost:4317"
+		} else {
+			endpoint = "http://localhost:4318"
+		}
 	}
 
 	opts := []autotel.Option{
