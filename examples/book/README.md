@@ -14,9 +14,10 @@ so a regression in the library shows up as a chapter that stopped working.
 
 ## What makes the Go version different
 
-The authors' companion repository is mostly Go. That means these examples do not
-have to translate anything: their file and ours can sit side by side, in the same
-language, and you can read the difference rather than take our word for it.
+The authors' [companion code](https://resources.oreilly.com/examples/0636920722618)
+is mostly Go. That means these examples do not have to translate anything: their
+file and ours can sit side by side, in the same language, and you can read the
+difference rather than take our word for it.
 
 | Ch  | Concept                            | Their Go code                              | Ours                    |
 | --- | ---------------------------------- | ------------------------------------------ | ----------------------- |
