@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-02
+
 ### Added
 
 - **`sampling.NewTargetRateSampler` and `autotel.WithTargetRateSampler`** hold a

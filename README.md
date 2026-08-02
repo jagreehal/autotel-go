@@ -1093,13 +1093,13 @@ if autotel.IsTracingEnabled(ctx) {
 
 Production ready. All core features implemented and tested.
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 **Go:** 1.25+ (Go 1.26.5 toolchain recommended)
 **License:** MIT
 
 ## Version
 
-Current version: `v2.1.0`
+Current version: `v2.2.0`
 
 ```go
 import "github.com/jagreehal/autotel-go/v2"
