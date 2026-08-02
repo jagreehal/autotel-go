@@ -9,7 +9,7 @@ import (
 
 func TestInMemorySubscriber_Send(t *testing.T) {
 	sub := NewInMemorySubscriber()
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	err := sub.Send(context.Background(), "test_event", map[string]any{"key": "value"})
 	assert.NoError(t, err)
@@ -22,7 +22,7 @@ func TestInMemorySubscriber_Send(t *testing.T) {
 
 func TestInMemorySubscriber_Reset(t *testing.T) {
 	sub := NewInMemorySubscriber()
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	_ = sub.Send(context.Background(), "test", nil)
 
@@ -34,7 +34,7 @@ func TestInMemorySubscriber_Reset(t *testing.T) {
 
 func TestInMemorySubscriber_MultipleEvents(t *testing.T) {
 	sub := NewInMemorySubscriber()
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	_ = sub.Send(context.Background(), "event1", nil)
 	_ = sub.Send(context.Background(), "event2", nil)

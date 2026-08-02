@@ -7,40 +7,74 @@ on:
     branches: [main]
 
 jobs:
+  # Lint runs once, on the toolchain declared in go.mod. golangci-lint refuses to
+  # start when it was built with an older Go than the target version, so running
+  # it across the full test matrix breaks on the lowest supported version.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+
+      - name: Run linters
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned: `latest` silently moves across major versions and the config
+          # schema is version-specific.
+          version: v2.12.2
+          args: --timeout=5m
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.21', '1.22', '1.23']
+        go-version: ['1.25.x', '1.26.x']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go-version }}
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Run linters
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: latest
-          args: --timeout=5m
-
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        if: matrix.go-version == '1.26.x'
+        uses: codecov/codecov-action@v7
         with:
-          file: ./coverage.out
+          files: ./coverage.out
           flags: unittests
           name: codecov-umbrella
 
-      - name: Run security scanner
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+
+      # Gates the release checklist in RELEASING.md, so it must fail the build.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # Advisory only: gosec is noisy on instrumentation code and is reviewed by
+      # hand rather than gating merges.
+      - name: Run security scanner (advisory)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec ./... || true
@@ -48,12 +82,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.23'
+          go-version: '1.26.x'
 
       - name: Download dependencies
         run: go mod download

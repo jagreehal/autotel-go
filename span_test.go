@@ -9,8 +9,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/jagreehal/autotel-go"
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	"github.com/jagreehal/autotel-go/v2"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func TestSpan_SetAttribute(t *testing.T) {

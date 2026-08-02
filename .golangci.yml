@@ -1,19 +1,26 @@
+# golangci-lint v2 configuration.
+# The v1 schema (top-level `linters-settings`, the `gosimple` linter) is rejected
+# outright by v2, so this file must stay in the v2 format while CI installs v2.
+version: "2"
+
 linters:
+  # errcheck, govet, ineffassign, staticcheck and unused are enabled by default.
+  # gosimple was merged into staticcheck in v2 and no longer exists as a linter.
   enable:
-    - goimports
-    - govet
-    - errcheck
-    - staticcheck
-    - unused
-    - gosimple
-    - ineffassign
+    - gocritic
+    - gocyclo
     - misspell
     - unconvert
-    - gocyclo
-    - gocritic
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/jagreehal/autotel-go
-  gocyclo:
-    min-complexity: 15
+  settings:
+    gocyclo:
+      min-complexity: 15
+
+formatters:
+  enable:
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/jagreehal/autotel-go/v2

@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/jagreehal/autotel-go"
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	"github.com/jagreehal/autotel-go/v2"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func TestStart(t *testing.T) {
@@ -60,4 +60,41 @@ func TestTrace_Error(t *testing.T) {
 	// Verify span was created and error was recorded
 	spans := exporter.GetSpans()
 	assert.GreaterOrEqual(t, len(spans), 1)
+}
+
+func TestGetOperationContext(t *testing.T) {
+	ctx := context.Background()
+	name, ok := autotel.GetOperationContext(ctx)
+	assert.False(t, ok)
+	assert.Empty(t, name)
+}
+
+func TestGetOperationContext_FromStart(t *testing.T) {
+	_, cleanup := autoteltesting.SetupTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	ctx, span := autotel.Start(ctx, "CreateUser")
+	defer span.End()
+
+	name, ok := autotel.GetOperationContext(ctx)
+	assert.True(t, ok)
+	assert.Equal(t, "CreateUser", name)
+}
+
+func TestRunInOperationContext(t *testing.T) {
+	ctx := context.Background()
+
+	result, err := autotel.RunInOperationContext(ctx, "batch.import", func(ctx context.Context) (int, error) {
+		name, ok := autotel.GetOperationContext(ctx)
+		assert.True(t, ok)
+		assert.Equal(t, "batch.import", name)
+		return 42, nil
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, 42, result)
+
+	// Outside fn, original ctx unchanged
+	_, ok := autotel.GetOperationContext(ctx)
+	assert.False(t, ok)
 }

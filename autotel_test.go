@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jagreehal/autotel-go"
+	"github.com/jagreehal/autotel-go/v2"
 )
 
 func TestInit_Basic(t *testing.T) {

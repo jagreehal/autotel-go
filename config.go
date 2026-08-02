@@ -6,10 +6,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/jagreehal/autotel-go/circuitbreaker"
-	"github.com/jagreehal/autotel-go/ratelimit"
-	"github.com/jagreehal/autotel-go/redaction"
-	"github.com/jagreehal/autotel-go/sampling"
+	"github.com/jagreehal/autotel-go/v2/circuitbreaker"
+	"github.com/jagreehal/autotel-go/v2/processors"
+	"github.com/jagreehal/autotel-go/v2/ratelimit"
+	"github.com/jagreehal/autotel-go/v2/redaction"
+	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // Protocol defines the OTLP protocol to use
@@ -97,6 +98,16 @@ type Config struct {
 	// Additional span processors to attach.
 	SpanProcessors []trace.SpanProcessor
 
+	// Optional pipeline: span filter and tail sampling.
+	// When set, these wrap each batch exporter in order: filter -> tail -> batch.
+	SpanFilter          processors.SpanFilterPredicate
+	TailSamplingEnabled bool
+
+	// BaggageToAttributes copies baggage onto span attributes when set.
+	// Configure with WithBaggageAttributes.
+	BaggageToAttributes bool
+	BaggageSpanProcOpts []processors.BaggageSpanProcessorOption
+
 	// Event queue tuning.
 	EventQueueSize     int
 	EventFlushInterval time.Duration
@@ -119,6 +130,25 @@ type Config struct {
 	MetricsEnabled  bool
 	MetricExporters []metric.Exporter
 	MetricInterval  time.Duration
+
+	// optionErrors collects validation failures raised by options, so a bad
+	// vendor preset surfaces as an Init error rather than panicking or silently
+	// exporting nowhere. Append via OptionError.
+	optionErrors []error
+}
+
+// OptionError records a validation failure on the config. Options that can fail
+// validation — vendor presets in particular — call this instead of panicking, so
+// the failure surfaces from Init with everything else.
+func (c *Config) OptionError(err error) {
+	if err != nil {
+		c.optionErrors = append(c.optionErrors, err)
+	}
+}
+
+// OptionErrors returns the validation failures accumulated by options.
+func (c *Config) OptionErrors() []error {
+	return c.optionErrors
 }
 
 // DefaultConfig returns a Config with sensible defaults.

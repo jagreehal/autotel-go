@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/jagreehal/autotel-go"
-	autoteltesting "github.com/jagreehal/autotel-go/testing"
+	"github.com/jagreehal/autotel-go/v2"
+	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
 
 func TestTraceFunc_ImmediateExecution(t *testing.T) {

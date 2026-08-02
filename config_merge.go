@@ -47,12 +47,33 @@ func applyYAMLLayer(target *Config, yaml *Config) {
 }
 
 // applyExplicitLayer applies explicit config (highest priority).
+//
+// The explicit config is taken wholesale rather than field by field. An earlier
+// version enumerated the fields to copy, which meant every new Config field was
+// silently discarded until someone remembered to extend the list — WithSpanFilter
+// and WithTailSampling both shipped that way and did nothing. Copying everything
+// and then restoring only the fields that env and YAML also feed inverts that: a
+// new field is carried by default and cannot be forgotten.
 func applyExplicitLayer(target *Config, explicit *Config) {
 	if explicit == nil {
 		return
 	}
 
-	// Apply mergeable fields (only if explicitly set)
+	// Fields resolved from the env and YAML layers, which must survive the copy.
+	layered := *target
+
+	*target = *explicit
+
+	target.ServiceName = layered.ServiceName
+	target.ServiceVersion = layered.ServiceVersion
+	target.Environment = layered.Environment
+	target.Endpoint = layered.Endpoint
+	target.Protocol = layered.Protocol
+	target.Headers = layered.Headers
+	target.ResourceAttributes = layered.ResourceAttributes
+	target.Debug = layered.Debug
+
+	// Explicit still wins over both lower layers.
 	applyExplicitString(&target.ServiceName, explicit.ServiceName, defaultServiceName)
 	applyStringIfSet(&target.ServiceVersion, explicit.ServiceVersion)
 	applyStringIfSet(&target.Environment, explicit.Environment)
@@ -64,37 +85,6 @@ func applyExplicitLayer(target *Config, explicit *Config) {
 	if explicit.Debug != nil {
 		target.Debug = explicit.Debug
 	}
-
-	// Copy all other fields directly (they don't come from YAML/env)
-	copyExplicitOnlyFields(target, explicit)
-}
-
-// copyExplicitOnlyFields copies fields that only come from explicit config.
-func copyExplicitOnlyFields(target, explicit *Config) {
-	target.Insecure = explicit.Insecure
-	target.Sampler = explicit.Sampler
-	target.UseAdaptiveSampler = explicit.UseAdaptiveSampler
-	target.RateLimiter = explicit.RateLimiter
-	target.CircuitBreaker = explicit.CircuitBreaker
-	target.PIIRedactor = explicit.PIIRedactor
-	target.Subscribers = explicit.Subscribers
-	target.BackendPreset = explicit.BackendPreset
-	target.SpanExporters = explicit.SpanExporters
-	target.SpanProcessors = explicit.SpanProcessors
-	target.EventQueueSize = explicit.EventQueueSize
-	target.EventFlushInterval = explicit.EventFlushInterval
-	target.EventCBThreshold = explicit.EventCBThreshold
-	target.EventBackoffMin = explicit.EventBackoffMin
-	target.EventBackoffMax = explicit.EventBackoffMax
-	target.EventCBReset = explicit.EventCBReset
-	target.EventMaxRetries = explicit.EventMaxRetries
-	target.EventJitter = explicit.EventJitter
-	target.BatchTimeout = explicit.BatchTimeout
-	target.MaxQueueSize = explicit.MaxQueueSize
-	target.MaxExportBatchSize = explicit.MaxExportBatchSize
-	target.MetricsEnabled = explicit.MetricsEnabled
-	target.MetricExporters = explicit.MetricExporters
-	target.MetricInterval = explicit.MetricInterval
 }
 
 // applyStringIfSet sets target to source if source is non-empty.

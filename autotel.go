@@ -2,7 +2,9 @@ package autotel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,7 +21,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
-	"github.com/jagreehal/autotel-go/internal/exporters"
+	"github.com/jagreehal/autotel-go/v2/internal/exporters"
+	"github.com/jagreehal/autotel-go/v2/processors"
 )
 
 // EventTracker is an interface for tracking analytics events.
@@ -61,6 +64,11 @@ func Init(ctx context.Context, opts ...Option) (func(), error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	// Report option validation failures before building anything, so a missing
+	// API key fails loudly at startup instead of exporting into the void.
+	if err := errors.Join(cfg.optionErrors...); err != nil {
+		return nil, err
 	}
 	return initWithConfig(ctx, cfg)
 }
@@ -184,18 +192,33 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 }
 
 // buildSpanProcessors creates batch span processors for all exporters.
+// When SpanFilter or TailSamplingEnabled are set, each exporter is wrapped
+// in a chain: baggage -> filter -> tail -> batch.
+//
+// The baggage stage sits outermost because it writes attributes in OnStart,
+// which has to happen before any stage that inspects them.
 func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config) []trace.SpanProcessor {
-	processors := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
-	processors = append(processors, cfg.SpanProcessors...)
+	out := make([]trace.SpanProcessor, 0, len(exporters)+len(cfg.SpanProcessors))
+	out = append(out, cfg.SpanProcessors...)
 
 	for _, exp := range exporters {
-		processors = append(processors, trace.NewBatchSpanProcessor(exp,
+		p := trace.NewBatchSpanProcessor(exp,
 			trace.WithBatchTimeout(cfg.BatchTimeout),
 			trace.WithMaxQueueSize(cfg.MaxQueueSize),
 			trace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
-		))
+		)
+		if cfg.TailSamplingEnabled {
+			p = processors.NewTailSamplingSpanProcessor(p)
+		}
+		if cfg.SpanFilter != nil {
+			p = processors.NewFilteringSpanProcessor(cfg.SpanFilter, p)
+		}
+		if cfg.BaggageToAttributes {
+			p = processors.NewBaggageSpanProcessor(p, cfg.BaggageSpanProcOpts...)
+		}
+		out = append(out, p)
 	}
-	return processors
+	return out
 }
 
 // selectSampler returns the appropriate sampler based on config and debug mode.
@@ -427,23 +450,31 @@ func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) erro
 func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporter, error) {
 	if cfg.Protocol == ProtocolHTTP {
 		httpOpts := []otlptmetricOption{
-			otlptmetricWithEndpoint(cfg.Endpoint),
 			otlptmetricWithHeaders(cfg.Headers),
 			otlptmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 		}
-		if cfg.Insecure {
-			httpOpts = append(httpOpts, otlptmetricWithInsecure())
+		if endpointIsURL(cfg.Endpoint) {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
+		} else {
+			httpOpts = append(httpOpts, otlptmetricWithEndpoint(cfg.Endpoint))
+			if cfg.Insecure {
+				httpOpts = append(httpOpts, otlptmetricWithInsecure())
+			}
 		}
 		return otlpmetrichttp.New(ctx, httpOpts...)
 	}
 
 	grpcOpts := []otlpgmetricOption{
-		otlpgmetricWithEndpoint(cfg.Endpoint),
 		otlpgmetricWithHeaders(cfg.Headers),
 		otlpgmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
-	if cfg.Insecure {
-		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
+	if endpointIsURL(cfg.Endpoint) {
+		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
+	} else {
+		grpcOpts = append(grpcOpts, otlpgmetricWithEndpoint(cfg.Endpoint))
+		if cfg.Insecure {
+			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
+		}
 	}
 	return otlpmetricgrpc.New(ctx, grpcOpts...)
 }
@@ -489,26 +520,73 @@ func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, err
 	return exportersList, nil
 }
 
+// Per-signal OTLP paths appended to a base endpoint URL.
+const (
+	tracesPath  = "/v1/traces"
+	metricsPath = "/v1/metrics"
+)
+
+// endpointIsURL reports whether the configured endpoint is a full URL
+// ("https://host:port/path") rather than the bare "host:port" form.
+//
+// The two forms need different exporter options. WithEndpoint stores the string
+// verbatim as the host, so passing a URL to it yields a mangled target such as
+// "http://http:%2F%2Flocalhost:4318/v1/traces". WithEndpointURL parses the URL
+// properly and derives TLS from the scheme.
+func endpointIsURL(endpoint string) bool {
+	return strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://")
+}
+
+// signalEndpointURL joins a base endpoint URL with a per-signal OTLP path.
+//
+// Config carries one Endpoint for every signal, which makes it the base endpoint
+// in OTLP terms, so the signal path belongs on the end of it. WithEndpointURL
+// takes the path as complete and does not append anything, so a base carrying a
+// path of its own — Langfuse's /api/public/otel, PostHog's /i, a Grafana gateway
+// path — would otherwise have traces posted to the base itself. A base with no
+// path needs no help: the exporter already falls back to the default signal path.
+func signalEndpointURL(base, signalPath string) string {
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Path == "" || parsed.Path == "/" {
+		return base
+	}
+	// Respect an endpoint that already names the signal explicitly.
+	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), signalPath) {
+		return base
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + signalPath
+	return parsed.String()
+}
+
 func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, error) {
 	if cfg.Protocol == ProtocolHTTP {
 		httpOpts := []otlptracehttp.Option{
-			otlptracehttp.WithEndpoint(cfg.Endpoint),
 			otlptracehttp.WithHeaders(cfg.Headers),
 			otlptracehttp.WithTimeout(cfg.BatchTimeout + 5*time.Second),
 		}
-		if cfg.Insecure {
-			httpOpts = append(httpOpts, otlptracehttp.WithInsecure())
+		if endpointIsURL(cfg.Endpoint) {
+			// The scheme decides TLS; passing WithInsecure as well would override it.
+			httpOpts = append(httpOpts, otlptracehttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
+		} else {
+			httpOpts = append(httpOpts, otlptracehttp.WithEndpoint(cfg.Endpoint))
+			if cfg.Insecure {
+				httpOpts = append(httpOpts, otlptracehttp.WithInsecure())
+			}
 		}
 		return otlptracehttp.New(ctx, httpOpts...)
 	}
 
 	grpcOpts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(cfg.Endpoint),
 		otlptracegrpc.WithHeaders(cfg.Headers),
 		otlptracegrpc.WithTimeout(cfg.BatchTimeout + 5*time.Second),
 	}
-	if cfg.Insecure {
-		grpcOpts = append(grpcOpts, otlptracegrpc.WithInsecure())
+	if endpointIsURL(cfg.Endpoint) {
+		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
+	} else {
+		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
+		if cfg.Insecure {
+			grpcOpts = append(grpcOpts, otlptracegrpc.WithInsecure())
+		}
 	}
 	return otlptracegrpc.New(ctx, grpcOpts...)
 }

@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/subscribers"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/subscribers"
 )
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 			subscribers.WithPostHogDistinctID("user-123"),
 		),
 	)
-	defer queue.Shutdown(context.Background())
+	defer func() { _ = queue.Shutdown(context.Background()) }()
 
 	// Track user signup event
 	ctx := context.Background()

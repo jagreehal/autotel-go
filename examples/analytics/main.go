@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/subscribers"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/subscribers"
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 	// In production, use: subscribers.NewWebhookSubscriber("https://api.posthog.com", ...)
 	sub := subscribers.NewInMemorySubscriber()
 	queue := subscribers.NewQueue(sub)
-	defer queue.Shutdown(context.Background())
+	defer func() { _ = queue.Shutdown(context.Background()) }()
 
 	// Example: Track user signup event
 	ctx := context.Background()

@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jagreehal/autotel-go"
-	"github.com/jagreehal/autotel-go/subscribers"
+	"github.com/jagreehal/autotel-go/v2"
+	"github.com/jagreehal/autotel-go/v2/subscribers"
 )
 
 func TestTrackFunnelStep(t *testing.T) {

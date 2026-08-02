@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/jagreehal/autotel-go"
+	"github.com/jagreehal/autotel-go/v2"
 )
 
 // GinMiddleware returns a Gin middleware that traces requests.
