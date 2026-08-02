@@ -27,6 +27,15 @@ type EndPolicy struct {
 	SlowThreshold time.Duration
 	// SlowRate is the keep rate for spans at or above SlowThreshold.
 	SlowRate float64
+	// LinksBased keeps spans linked to a sampled span, and LinksRate is the rate
+	// at which it does so.
+	//
+	// The head sampler already makes this decision. The tail has to know about it
+	// as well, because a tail that only knew about the baseline would re-decide
+	// the span and drop the consumer half of an event-driven trace that the head
+	// had deliberately kept.
+	LinksBased bool
+	LinksRate  float64
 }
 
 // Active reports whether the policy keeps anything the baseline alone would drop.
@@ -101,6 +110,9 @@ func (k *Keeper) KeepSpan(s sdktrace.ReadOnlySpan) bool {
 	if k.wasKept(traceID) {
 		return true
 	}
+	if k.policy.LinksBased && hasSampledLink(s.Links()) {
+		return keepAtRate(traceID, k.policy.LinksRate)
+	}
 	return keepAtRate(traceID, k.policy.BaselineRate)
 }
 
@@ -155,4 +167,14 @@ func keepAtRate(traceID oteltrace.TraceID, rate float64) bool {
 		return false
 	}
 	return traceID[15] < uint8(rate*256)
+}
+
+// hasSampledLink reports whether any link points at a sampled span.
+func hasSampledLink(links []sdktrace.Link) bool {
+	for _, link := range links {
+		if link.SpanContext.IsSampled() {
+			return true
+		}
+	}
+	return false
 }

@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/jagreehal/autotel-go/v2/internal/exporters"
 	"github.com/jagreehal/autotel-go/v2/processors"
@@ -180,7 +181,7 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 
 	tailPolicy := endPolicyFor(cfg)
 	processors := buildSpanProcessors(exportersList, cfg, tailPolicy)
-	sampler := selectSampler(cfg, tailPolicy != nil)
+	sampler := withGuards(selectSampler(cfg, tailPolicy != nil), cfg)
 
 	providerOpts := []trace.TracerProviderOption{
 		trace.WithResource(res),
@@ -248,6 +249,55 @@ func endPolicyFor(cfg *Config) processors.TailPolicy {
 	return policy.NewKeeper().KeepSpan
 }
 
+// guardSampler sheds load before a span is built, by asking the configured rate
+// limiter and circuit breaker whether there is room for another trace.
+//
+// This sits in the sampler rather than in autotel.Start because every span
+// reaches a sampler, whoever created it. When the checks lived in Start they
+// covered only spans from Start, so a service using middleware, messaging or any
+// third-party instrumentation had a limit that bounded almost nothing.
+//
+// Only spans starting a trace are counted. A span whose parent is already sampled
+// passes through, because shedding it would leave a hole in a trace that is
+// otherwise being kept, and a trace with its middle missing is worth less under
+// load than no trace at all.
+type guardSampler struct {
+	next   trace.Sampler
+	guards []interface{ Allow() bool }
+}
+
+func (g guardSampler) ShouldSample(p trace.SamplingParameters) trace.SamplingResult {
+	if oteltrace.SpanContextFromContext(p.ParentContext).IsSampled() {
+		return g.next.ShouldSample(p)
+	}
+	for _, guard := range g.guards {
+		if !guard.Allow() {
+			return trace.SamplingResult{Decision: trace.Drop}
+		}
+	}
+	return g.next.ShouldSample(p)
+}
+
+func (g guardSampler) Description() string {
+	return "guardSampler(" + g.next.Description() + ")"
+}
+
+// withGuards wraps sampler with the rate limiter and circuit breaker, if either
+// is configured.
+func withGuards(sampler trace.Sampler, cfg *Config) trace.Sampler {
+	var guards []interface{ Allow() bool }
+	if cfg.RateLimiter != nil {
+		guards = append(guards, cfg.RateLimiter)
+	}
+	if cfg.CircuitBreaker != nil {
+		guards = append(guards, cfg.CircuitBreaker)
+	}
+	if len(guards) == 0 {
+		return sampler
+	}
+	return guardSampler{next: sampler, guards: guards}
+}
+
 // selectSampler returns the appropriate sampler based on config and debug mode.
 //
 // When a tail policy is in play the head must record every span, because a span
@@ -267,14 +317,10 @@ func selectSampler(cfg *Config, hasTailPolicy bool) trace.Sampler {
 	return cfg.Sampler
 }
 
-// setupGlobalFeatures configures global rate limiters, circuit breakers, etc.
+// setupGlobalFeatures configures the globals that are consulted outside the
+// tracer provider. The rate limiter and circuit breaker are not among them: they
+// run inside the sampler, so buildTracerProvider owns them.
 func setupGlobalFeatures(cfg *Config) {
-	if cfg.RateLimiter != nil {
-		setGlobalRateLimiter(cfg.RateLimiter)
-	}
-	if cfg.CircuitBreaker != nil {
-		setGlobalCircuitBreaker(cfg.CircuitBreaker)
-	}
 	if cfg.PIIRedactor != nil {
 		setGlobalPIIRedactor(cfg.PIIRedactor)
 	}

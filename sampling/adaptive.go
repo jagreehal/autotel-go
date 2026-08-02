@@ -116,6 +116,8 @@ func (s *AdaptiveSampler) EndPolicy() EndPolicy {
 		ErrorRate:     s.errorRate,
 		SlowThreshold: time.Duration(s.slowThresholdNano),
 		SlowRate:      s.slowRate,
+		LinksBased:    s.linksBased,
+		LinksRate:     s.linksRate,
 	}
 }
 
