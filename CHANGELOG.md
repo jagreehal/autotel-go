@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-02
+
 ### Fixed
 
 - **`WithRateLimit` and `WithCircuitBreaker` covered only some of your spans.**
@@ -22,6 +24,12 @@ All notable changes to this project will be documented in this file.
   introduced in that release re-applied the baseline at `OnEnd` and knew nothing
   about links, so it dropped the consumer spans the head sampler had deliberately
   kept. `EndPolicy` now carries the links configuration.
+
+### Removed
+
+- The unexported `noopSpan`, which `Start` returned when the rate limiter or
+  circuit breaker rejected a span. Both now run in the sampler, so nothing
+  constructs it.
 
 ### Added
 

@@ -171,17 +171,3 @@ func (s *spanImpl) SpanContext() trace.SpanContext {
 func (s *spanImpl) IsRecording() bool {
 	return s.span.IsRecording()
 }
-
-// noopSpan is a no-op span implementation for rate-limited or disabled spans
-type noopSpan struct{}
-
-func (n *noopSpan) SetAttribute(key string, value any)                {}
-func (n *noopSpan) AddEvent(name string, attrs ...attribute.KeyValue) {}
-func (n *noopSpan) AddLink(link trace.Link)                           {}
-func (n *noopSpan) AddLinks(links ...trace.Link)                      {}
-func (n *noopSpan) UpdateName(name string)                            {}
-func (n *noopSpan) SetStatus(code codes.Code, description string)     {}
-func (n *noopSpan) RecordError(err error)                             {}
-func (n *noopSpan) End()                                              {}
-func (n *noopSpan) SpanContext() trace.SpanContext                    { return trace.SpanContext{} }
-func (n *noopSpan) IsRecording() bool                                 { return false }

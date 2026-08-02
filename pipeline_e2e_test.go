@@ -435,9 +435,10 @@ func TestWithTargetRateSamplerBindsAfterMeasuringEndToEnd(t *testing.T) {
 
 	var first, second int
 	for _, name := range spanNames(exporter) {
-		if name == "first" {
+		switch name {
+		case "first":
 			first++
-		} else if name == "second" {
+		case "second":
 			second++
 		}
 	}
@@ -468,7 +469,7 @@ func TestServiceVersionAndEnvironmentReachTheExporterEndToEnd(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, attr := range spans[0].Resource.Attributes() {
-		got[string(attr.Key)] = attr.Value.Emit()
+		got[string(attr.Key)] = attr.Value.String()
 	}
 	if got["service.version"] != "4.5.6" {
 		t.Errorf("service.version = %q, want 4.5.6", got["service.version"])
