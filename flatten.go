@@ -53,18 +53,23 @@ func flattenInto(out map[string]any, prefix string, fields map[string]any) {
 		case fmt.Stringer:
 			out[key] = v.String()
 		default:
-			if base, ok := baseValue(v); ok {
-				out[key] = base
-				continue
-			}
-			raw, err := json.Marshal(v)
-			if err != nil {
-				out[key] = "<serialization-failed>"
-				continue
-			}
-			out[key] = string(raw)
+			out[key] = otherValue(v)
 		}
 	}
+}
+
+// otherValue records a value flattenInto has no case for: its base kind when
+// it has one, otherwise its JSON.
+func otherValue(v any) any {
+	if base, ok := baseValue(v); ok {
+		return base
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "<serialization-failed>"
+	}
+
+	return string(raw)
 }
 
 // attributesFrom converts flattened fields to attributes, redacted the same

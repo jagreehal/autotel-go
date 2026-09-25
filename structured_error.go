@@ -48,7 +48,7 @@ func (e *StructuredError) Unwrap() error { return e.Cause }
 // in a terminal. %v and %s write Message alone.
 func (e *StructuredError) Format(f fmt.State, verb rune) {
 	if verb != 'v' || !f.Flag('+') {
-		fmt.Fprint(f, e.Message)
+		_, _ = fmt.Fprint(f, e.Message)
 		return
 	}
 
@@ -64,7 +64,7 @@ func (e *StructuredError) Format(f fmt.State, verb rune) {
 	if e.Cause != nil {
 		lines = append(lines, "  Caused by: "+e.Cause.Error())
 	}
-	fmt.Fprint(f, strings.Join(lines, "\n"))
+	_, _ = fmt.Fprint(f, strings.Join(lines, "\n"))
 }
 
 // MarshalJSON writes the client-safe shape of the error. Internal is left out,

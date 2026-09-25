@@ -24,7 +24,7 @@ func attrsOf(t *testing.T, exporter *tracetest.InMemoryExporter, name string) ma
 		if span.Name == name {
 			out := map[string]string{"status": span.Status.Code.String()}
 			for _, kv := range span.Attributes {
-				out[string(kv.Key)] = kv.Value.Emit()
+				out[string(kv.Key)] = kv.Value.String()
 			}
 			for _, event := range span.Events {
 				out["event:"+event.Name] = fmt.Sprint(len(event.Attributes))

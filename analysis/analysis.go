@@ -86,41 +86,7 @@ func CompareCohorts(opts Options) []CohortDifference {
 	minDifference := cmp.Or(opts.MinDifference, 0.1)
 	limit := cmp.Or(opts.Limit, 20)
 
-	includes := func(field string) bool {
-		if slices.Contains(opts.IgnoreFields, field) {
-			return false
-		}
-
-		return opts.Fields == nil || slices.Contains(opts.Fields, field)
-	}
-
-	tally := map[string]map[string]*counts{}
-	accumulate := func(events []Event, outlier bool) {
-		for _, event := range events {
-			for field, raw := range event {
-				value, ok := valueKey(raw)
-				if !ok || !includes(field) {
-					continue
-				}
-
-				if tally[field] == nil {
-					tally[field] = map[string]*counts{}
-				}
-				c := tally[field][value]
-				if c == nil {
-					c = &counts{}
-					tally[field][value] = c
-				}
-				if outlier {
-					c.outlier++
-				} else {
-					c.baseline++
-				}
-			}
-		}
-	}
-	accumulate(opts.Outlier, true)
-	accumulate(opts.Baseline, false)
+	tally := tallyCohorts(opts)
 
 	total := float64(len(opts.Outlier) + len(opts.Baseline))
 
@@ -168,6 +134,48 @@ func CompareCohorts(opts Options) []CohortDifference {
 	}
 
 	return results
+}
+
+// tallyCohorts counts, per included field and value, how many outlier and
+// baseline events carry it.
+func tallyCohorts(opts Options) map[string]map[string]*counts {
+	includes := func(field string) bool {
+		if slices.Contains(opts.IgnoreFields, field) {
+			return false
+		}
+
+		return opts.Fields == nil || slices.Contains(opts.Fields, field)
+	}
+
+	tally := map[string]map[string]*counts{}
+	accumulate := func(events []Event, outlier bool) {
+		for _, event := range events {
+			for field, raw := range event {
+				value, ok := valueKey(raw)
+				if !ok || !includes(field) {
+					continue
+				}
+
+				if tally[field] == nil {
+					tally[field] = map[string]*counts{}
+				}
+				c := tally[field][value]
+				if c == nil {
+					c = &counts{}
+					tally[field][value] = c
+				}
+				if outlier {
+					c.outlier++
+				} else {
+					c.baseline++
+				}
+			}
+		}
+	}
+	accumulate(opts.Outlier, true)
+	accumulate(opts.Baseline, false)
+
+	return tally
 }
 
 // valueKey renders a scalar as a grouping key. Anything else (a map, a slice,
