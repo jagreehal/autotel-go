@@ -35,6 +35,10 @@ cleanup, err := autotel.Init(context.Background(),
 }
 ```
 
+Working locally? Run `npx autotel-devtools` and swap `WithEndpoint` for
+`autotel.WithDevtools()` to watch every trace, metric and log in a browser at
+<http://127.0.0.1:4318>.
+
 ## 2. Add Tracing
 
 ### Option A: Using Start()

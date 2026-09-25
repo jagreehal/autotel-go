@@ -51,6 +51,15 @@ func (s *spanImpl) SetAttribute(key string, value any) {
 		return
 	}
 
+	s.span.SetAttributes(redactedAttribute(key, value))
+	debugSpanAttribute(s.span.SpanContext(), key, value)
+}
+
+// redactedAttribute converts a value to an OpenTelemetry attribute, applying
+// the PII redactor to its string form first. Everything that writes a caller's
+// value onto a span goes through here, so a redacted field cannot reappear
+// unredacted in an event.
+func redactedAttribute(key string, value any) attribute.KeyValue {
 	// Convert value to string for PII redaction check
 	strValue := fmt.Sprintf("%v", value)
 
@@ -100,8 +109,7 @@ func (s *spanImpl) SetAttribute(key string, value any) {
 		attr = attribute.String(key, strValue)
 	}
 
-	s.span.SetAttributes(attr)
-	debugSpanAttribute(s.span.SpanContext(), key, value)
+	return attr
 }
 
 func (s *spanImpl) AddEvent(name string, attrs ...attribute.KeyValue) {
@@ -153,6 +161,9 @@ func (s *spanImpl) RecordError(err error) {
 	}
 	s.span.RecordError(err)
 	s.span.SetStatus(codes.Error, err.Error())
+	for key, value := range errorAttributes(err) {
+		s.SetAttribute(key, value)
+	}
 	debugSpanError(s.span.SpanContext(), err)
 }
 

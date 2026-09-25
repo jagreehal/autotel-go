@@ -2,11 +2,9 @@ package autotel
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -152,8 +150,7 @@ func RecordError(ctx context.Context, err error, attrs map[string]any) {
 			}
 			span.AddEvent("exception", trace.WithAttributes(otelAttrs...))
 		}
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		(&spanImpl{span: span}).RecordError(err)
 	}
 }
 
@@ -164,7 +161,7 @@ func GetTraceID(ctx context.Context) string {
 	if span.IsRecording() {
 		sc := span.SpanContext()
 		if sc.IsValid() {
-			return fmt.Sprintf("%032x", sc.TraceID())
+			return sc.TraceID().String()
 		}
 	}
 	return ""
@@ -177,7 +174,7 @@ func GetSpanID(ctx context.Context) string {
 	if span.IsRecording() {
 		sc := span.SpanContext()
 		if sc.IsValid() {
-			return fmt.Sprintf("%016x", sc.SpanID())
+			return sc.SpanID().String()
 		}
 	}
 	return ""

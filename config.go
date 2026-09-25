@@ -3,6 +3,7 @@ package autotel
 import (
 	"time"
 
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 
@@ -79,6 +80,11 @@ type Config struct {
 	// UseAdaptiveSampler indicates whether adaptive sampling is enabled
 	UseAdaptiveSampler bool
 
+	// samplerChosen records that an option picked the sampler, so a default
+	// that depends on the sampler (WithDevtools keeping every trace) can tell
+	// an explicit adaptive sampler from the default one.
+	samplerChosen bool
+
 	// Subscribers are event subscribers (PostHog, Mixpanel, etc.)
 	// If provided, a global event queue will be created automatically.
 	Subscribers []Subscriber
@@ -102,6 +108,14 @@ type Config struct {
 	// When set, these wrap each batch exporter in order: filter -> tail -> batch.
 	SpanFilter          processors.SpanFilterPredicate
 	TailSamplingEnabled bool
+
+	// DebugCapture honours DebugBaggageKey on incoming requests. Configure
+	// with WithDebugCapture.
+	DebugCapture bool
+
+	// Devtools sends everything to a local autotel-devtools receiver when no
+	// endpoint is configured. Configure with WithDevtools.
+	Devtools bool
 
 	// BaggageToAttributes copies baggage onto span attributes when set.
 	// Configure with WithBaggageAttributes.
@@ -130,6 +144,10 @@ type Config struct {
 	MetricsEnabled  bool
 	MetricExporters []metric.Exporter
 	MetricInterval  time.Duration
+
+	// Logs control. OTEL_LOGS_EXPORTER=none also disables log export.
+	LogsEnabled  bool
+	LogExporters []sdklog.Exporter
 
 	// optionErrors collects validation failures raised by options, so a bad
 	// vendor preset surfaces as an Init error rather than panicking or silently
@@ -187,5 +205,6 @@ func defaultConfig() *Config {
 		EventJitter:        100 * time.Millisecond,
 		MetricsEnabled:     true,
 		MetricInterval:     60 * time.Second,
+		LogsEnabled:        true,
 	}
 }

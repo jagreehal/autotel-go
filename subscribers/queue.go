@@ -124,8 +124,8 @@ func (q *Queue) Track(ctx context.Context, name string, properties map[string]an
 		sc := span.SpanContext()
 		if sc.IsValid() {
 			// Format as hex strings (matching Python format)
-			props["trace_id"] = fmt.Sprintf("%032x", sc.TraceID())
-			props["span_id"] = fmt.Sprintf("%016x", sc.SpanID())
+			props["trace_id"] = sc.TraceID().String()
+			props["span_id"] = sc.SpanID().String()
 		}
 	}
 

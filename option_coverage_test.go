@@ -37,6 +37,10 @@ var verifiedElsewhere = map[string]string{
 	"WithProtocol": "option_config_test.go",
 	"WithHeaders":  "option_config_test.go",
 	"WithBackend":  "option_config_test.go",
+	// Sends to a live receiver, so it is driven against an httptest server.
+	"WithDevtools": "devtools_test.go",
+	// Asserted with a sampler that drops everything, on and off.
+	"WithDebugCapture": "debugcapture_test.go",
 
 	// The event pipeline runs beside the span pipeline, so a span exporter cannot
 	// see it. Delivery is asserted against a recording subscriber; the queue
@@ -45,13 +49,18 @@ var verifiedElsewhere = map[string]string{
 	"WithEventQueue":   "option_config_test.go",
 	"WithEventBackoff": "option_config_test.go",
 	"WithEventRetry":   "option_config_test.go",
+
+	// Metrics and logs have their own pipelines beside the span exporter; they
+	// are asserted against recording metric and log exporters.
+	"WithMetricExporters": "signals_test.go",
+	"WithLogs":            "signals_test.go",
+	"WithLogExporters":    "signals_test.go",
 }
 
 // knownUnverified is the honest remainder: options with no assertion anywhere.
 // Shrinking this list is the work; an option must never be added to it without
 // a reason that survives being read aloud.
 var knownUnverified = map[string]string{
-	"WithMetricExporters":    "metrics reach a reader, not the span exporter; needs a metric-side harness",
 	"WithMetricInterval":     "same, and asserting an interval means controlling the reader's clock",
 	"WithMaxQueueSize":       "only observable by overflowing the batch processor, which is timing-dependent",
 	"WithMaxExportBatchSize": "same",

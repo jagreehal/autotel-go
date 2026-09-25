@@ -33,3 +33,11 @@ golangci-lint.cache
 .DS_Store
 # Local drafts and scratch work, deliberately not published
 .local/
+
+# executable-stories run artifacts
+.executable-stories/
+reports/
+
+# Local cross-module development (see go.work)
+go.work
+go.work.sum

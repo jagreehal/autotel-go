@@ -3,6 +3,7 @@ package autotel
 import (
 	"time"
 
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	metricSdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
 
@@ -51,9 +52,45 @@ func WithProtocol(protocol Protocol) Option {
 	}
 }
 
+// WithDevtools sends traces, metrics and logs to a local autotel-devtools
+// receiver, set up for a developer watching every request go by.
+//
+//	cleanup, err := autotel.Init(ctx,
+//	    autotel.WithService("atm"),
+//	    autotel.WithDevtools(),
+//	)
+//
+// It changes three defaults, and only defaults: anything configured explicitly
+// or through the environment still wins.
+//
+//   - The endpoint is DevtoolsEndpoint over HTTP, unless WithEndpoint, YAML or
+//     OTEL_EXPORTER_OTLP_ENDPOINT names another. Point the variable at a
+//     devtools on another port and the code does not change.
+//   - Every trace is kept, unless an option chose a sampler.
+//   - The stderr span printer is off, unless WithDebug or AUTOTEL_DEBUG turned
+//     it on. The devtools UI is where the spans are read.
+func WithDevtools() Option {
+	return func(c *Config) {
+		c.Devtools = true
+	}
+}
+
+// WithDebugCapture keeps every span of a request that carries
+// DebugBaggageKey in its baggage, whatever the sampler or tail policy decide.
+// The rate limiter and circuit breaker still apply.
+//
+// Baggage arrives from callers, so enable this on services whose callers you
+// trust to set it: behind a gateway that strips or sets the key.
+func WithDebugCapture() Option {
+	return func(c *Config) {
+		c.DebugCapture = true
+	}
+}
+
 // WithSampler sets a custom sampler
 func WithSampler(sampler trace.Sampler) Option {
 	return func(c *Config) {
+		c.samplerChosen = true
 		c.Sampler = sampler
 		c.UseAdaptiveSampler = false
 	}
@@ -105,6 +142,7 @@ func WithPIIRedaction(opts ...redaction.PIIRedactorOption) Option {
 //	)
 func WithAdaptiveSampler(opts ...sampling.AdaptiveSamplerOption) Option {
 	return func(c *Config) {
+		c.samplerChosen = true
 		c.Sampler = sampling.NewAdaptiveSampler(opts...)
 		c.UseAdaptiveSampler = true
 	}
@@ -131,6 +169,7 @@ func WithAdaptiveSampler(opts ...sampling.AdaptiveSamplerOption) Option {
 // Pair it with WithAdaptiveSampler's error and slow rates if you need both.
 func WithTargetRateSampler(opts ...sampling.TargetRateOption) Option {
 	return func(c *Config) {
+		c.samplerChosen = true
 		c.Sampler = sampling.NewTargetRateSampler(opts...)
 		c.UseAdaptiveSampler = false
 	}
@@ -162,6 +201,7 @@ func WithTargetRateSampler(opts ...sampling.TargetRateOption) Option {
 //	}
 func WithLinksBasedSampling(rate float64) Option {
 	return func(c *Config) {
+		c.samplerChosen = true
 		c.Sampler = sampling.NewAdaptiveSampler(
 			sampling.WithLinksBased(true),
 			sampling.WithLinksRate(rate),
@@ -341,6 +381,21 @@ func WithMetrics(enabled bool) Option {
 func WithMetricExporters(exporters ...metricSdk.Exporter) Option {
 	return func(c *Config) {
 		c.MetricExporters = append(c.MetricExporters, exporters...)
+	}
+}
+
+// WithLogs toggles OTLP log export. On by default; like metrics, nothing is
+// exported until an endpoint or a custom log exporter is configured.
+func WithLogs(enabled bool) Option {
+	return func(c *Config) {
+		c.LogsEnabled = enabled
+	}
+}
+
+// WithLogExporters appends custom log exporters.
+func WithLogExporters(exporters ...sdklog.Exporter) Option {
+	return func(c *Config) {
+		c.LogExporters = append(c.LogExporters, exporters...)
 	}
 }
 
