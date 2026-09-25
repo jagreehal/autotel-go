@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Local devtools.** `WithDevtools()` sends traces, metrics and logs to
+  `npx autotel-devtools` at `http://127.0.0.1:4318` and keeps every trace. An
+  explicit endpoint, `OTEL_EXPORTER_OTLP_ENDPOINT`, sampler or `WithDebug`
+  still takes precedence.
+- **Log export.** `autotel.Logger(name)` returns a `*slog.Logger` that exports
+  over OTLP with the trace and span ID from `ctx`. Toggle it with `WithLogs`,
+  add exporters with `WithLogExporters`.
+- **Lifecycle.** `Flush(ctx)` and `Shutdown(ctx)` report delivery errors.
+  `Shutdown` runs once and gives up after `ShutdownTimeout` (5s) when `ctx` has
+  no deadline.
+- **Wide events.** `NewRequestLogger(ctx)` gathers a request's fields onto its
+  span; `EmitNow` records them as one event.
+- **Structured errors.** `StructuredError` carries `Why`, `Fix`, `Link`,
+  `Code`, `Status` and `Details`, and a span that records one gains
+  `error.why`, `error.fix`, `error.code`, `error.status` and `error.details.*`.
+  `ParseError` reads any error back as those fields.
+- **`analysis` package.** `CompareCohorts` ranks the field values that separate
+  slow or failing requests from normal ones; `Bucket` groups raw numbers.
+- **Business events.** `subscribers.NewFileSubscriber` writes events as NDJSON,
+  and `Track` warns once when `Init` has no subscribers.
+- **Baggage.** `SetBaggage(ctx, key, value)` adds W3C baggage. With
+  `WithDebugCapture()`, a request carrying `DebugBaggageKey` (`autotel.debug`)
+  keeps every span in every service it reaches, within the rate limiter and
+  circuit breaker.
+- **Propagation.** `Init` installs the W3C TraceContext and Baggage
+  propagators, so HTTP and gRPC middleware continue incoming traces.
+
+### Changed
+
+- **Go 1.26.** Dependencies now track OpenTelemetry 1.46, contrib 0.71 and
+  gRPC 1.84.
+- **Metrics.** `Meter()` links data points to traces through exemplars, keeps
+  one series per attribute set, resolves the current provider on each call,
+  and `cleanup()` flushes pending metrics on exit.
+- **Endpoints.** Every signal posts to its own OTLP path (`/v1/traces`,
+  `/v1/metrics`, `/v1/logs`) for any endpoint form.
+- **IDs.** `GetTraceID`, `GetSpanID` and tracked events use the standard 32-
+  and 16-character hex IDs.
+
 ## [2.2.1] - 2026-08-02
 
 ### Fixed

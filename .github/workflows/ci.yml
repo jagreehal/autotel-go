@@ -25,14 +25,14 @@ jobs:
         with:
           # Pinned: `latest` silently moves across major versions and the config
           # schema is version-specific.
-          version: v2.12.2
+          version: v2.14.0
           args: --timeout=5m
 
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.25.x', '1.26.x']
+        go-version: ['1.26.x', '1.27.x']
 
     steps:
       - uses: actions/checkout@v7

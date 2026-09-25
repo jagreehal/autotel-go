@@ -12,14 +12,14 @@ func TestSignalEndpointURL(t *testing.T) {
 		want string
 	}{
 		{
-			name: "no path falls through to the exporter default",
+			name: "no path gets the signal path",
 			base: "http://localhost:4318",
-			want: "http://localhost:4318",
+			want: "http://localhost:4318/v1/traces",
 		},
 		{
-			name: "bare root falls through as well",
+			name: "bare root gets it as well",
 			base: "http://localhost:4318/",
-			want: "http://localhost:4318/",
+			want: "http://localhost:4318/v1/traces",
 		},
 		{
 			name: "PostHog base path",

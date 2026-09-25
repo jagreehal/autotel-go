@@ -38,6 +38,12 @@ func main() {
 }
 ```
 
+`cleanup` flushes and closes every pipeline. To learn whether the last batch
+was delivered, call `autotel.Shutdown(ctx)` instead: it returns an error when no
+receiver acknowledged the export, and gives up after `ShutdownTimeout` (5s) when
+`ctx` has no deadline. `autotel.Flush(ctx)` sends what is buffered and keeps
+running.
+
 **Configuration options:**
 
 - Environment variables: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`, `AUTOTEL_DEBUG`, etc.
@@ -48,9 +54,9 @@ func main() {
 
 #### Environment variables (optional)
 
-You can configure autotel-go entirely via standard OTEL env vars—the SDK only falls back to functional options if the env var is missing:
+You can configure autotel-go entirely via standard OTEL env vars. An explicit option wins over YAML, and YAML over the environment, so a variable fills in only what the code left unset:
 
-- `OTEL_SERVICE_NAME` – overrides `WithService`.
+- `OTEL_SERVICE_NAME` – used when `WithService` is not given.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` – host:port or URL; when set we enable OTLP trace + metric exporters.
 - `OTEL_EXPORTER_OTLP_PROTOCOL` – `http` (default) or `grpc`.
 - `OTEL_EXPORTER_OTLP_HEADERS` – comma-separated `key=value` pairs for API keys/datasets.
@@ -122,10 +128,27 @@ import "github.com/jagreehal/autotel-go/v2"
 m := autotel.Meter()
 m.Counter(ctx, "checkout.requests", 1, map[string]any{"region": "iad"})
 m.Histogram(ctx, "checkout.latency_ms", float64(duration.Milliseconds()), nil)
-// trace_id/span_id are attached automatically when a span is present
+// a span in ctx is attached as an exemplar (trace_id/span_id), never as a metric label
 ```
 
 Event delivery is hardened by default (buffer=1000, backoff 100ms→5s, circuit threshold=5, reset every 10s). Tune with `WithEventQueue`, `WithEventBackoff`, and `WithEventRetry`.
+
+### 5. Export logs over OTLP
+
+```go
+logger := autotel.Logger("checkout") // call after Init
+
+ctx, span := autotel.Start(ctx, "ProcessOrder")
+defer span.End()
+logger.InfoContext(ctx, "order placed", "order_id", id)
+// the record carries trace_id/span_id, so your backend links it to the trace
+```
+
+Log export follows the same rules as metrics: on by default, active once an endpoint (or `WithLogExporters`) is set. Turn it off with `WithLogs(false)` or `OTEL_LOGS_EXPORTER=none`. `cleanup()` flushes spans, metrics and logs.
+
+### Trace propagation across services
+
+`Init` installs the W3C `traceparent` and `baggage` propagators globally. `middleware.HTTPMiddleware`, the gRPC interceptors and `NewHTTPClient` use them, so a request that crosses services stays one trace.
 
 ## Features
 
@@ -420,17 +443,17 @@ Propagate business context across services with PII protection:
 import "github.com/jagreehal/autotel-go/v2/baggage"
 
 // Configure allowed keys and PII handling
-bc := baggage.New(
-    baggage.WithAllowedKeys("tenant_id", "correlation_id", "user_tier"),
-    baggage.WithHashKeys("user_id", "email"),  // Auto-hash PII
-    baggage.WithMaxValueLength(256),
-)
+bc := baggage.NewWithProfile(&baggage.Profile{
+    AllowedKeys:    map[string]bool{"tenant_id": true, "user_id": true, "user_tier": true},
+    HashKeys:       map[string]bool{"user_id": true}, // Auto-hash PII
+    MaxValueLength: 256,
+})
 
-// Set baggage (PII is automatically hashed)
+// Set baggage (PII is automatically hashed; keys off the allowlist are dropped)
 ctx, _ = bc.Set(ctx, "tenant_id", "acme-corp")
 ctx, _ = bc.Set(ctx, "user_id", "user@example.com") // → stored as SHA256 hash
 
-// Quick helper for multiple values
+// Quick helper for multiple values (uses the default profile)
 ctx = baggage.WithBusinessContext(ctx,
     "tenant_id", "acme-corp",
     "correlation_id", "abc-123",
@@ -670,22 +693,42 @@ links := sampling.ExtractLinksFromBatch(messages, func(m Message) map[string]str
 ### Local development with autotel-devtools
 
 [`autotel-devtools`](https://www.npmjs.com/package/autotel-devtools) is a local
-OTLP receiver with a web UI. `backends.Collector` already points at it, so there
-is nothing to configure:
+OTLP receiver with a web UI. `WithDevtools` points every signal at it:
 
 ```sh
-npx autotel-devtools    # listens on http://localhost:4318
+npx autotel-devtools    # listens on http://127.0.0.1:4318
 ```
 
 ```go
-cleanup, err := autotel.Init(ctx,
-    backends.Collector(backends.CollectorConfig{Service: "my-service"}),
+_, err := autotel.Init(ctx,
+    autotel.WithService("my-service"),
+    autotel.WithDevtools(),
 )
 ```
 
-Open <http://localhost:4318> and traces appear as they are exported. The receiver
-accepts OTLP over HTTP in both protobuf and JSON, and the Go SDK sends protobuf
-by default, so no environment variables are needed.
+Open <http://127.0.0.1:4318> and traces, metrics and logs appear as they are
+exported. `WithDevtools` changes defaults only: an explicit endpoint or
+`OTEL_EXPORTER_OTLP_ENDPOINT` still wins (run devtools on another port and set
+the variable), every trace is kept unless you chose a sampler, and the stderr
+span printer is off unless `WithDebug` or `AUTOTEL_DEBUG` asks for it.
+
+### Keep one request whatever the sampler decides
+
+With `WithDebugCapture()` in `Init`, a request carrying `autotel.debug` baggage
+keeps every span in every service it reaches, whatever the sampler or tail
+policy decide. The rate limiter and circuit breaker still apply. Set it at the
+edge for one request:
+
+```go
+ctx, err := autotel.SetBaggage(ctx, autotel.DebugBaggageKey, "ticket-4411")
+```
+
+Callers control baggage, so enable the option on services whose callers you
+trust: behind a gateway that sets or strips the key.
+
+`SetBaggage` sets any W3C baggage member. Pair it with
+`WithBaggageAttributes(processors.WithBaggagePrefix(""))` to copy baggage onto
+every span, in this service and downstream.
 
 ## Advanced Features
 
@@ -733,9 +776,64 @@ Use `slo.WithClock` for deterministic simulations and tests,
 send the `autotel.slo.outcomes` and `autotel.slo.burn_rate` instruments to a
 specific meter provider.
 
+### Wide events: one record per request
+
+`NewRequestLogger` gathers everything a unit of work learned onto the span in
+`ctx`, so one record answers questions nobody planned for:
+
+```go
+event := autotel.NewRequestLogger(ctx)
+defer event.EmitNow() // exactly one record, success or failure
+
+event.Set(map[string]any{
+    "user":  map[string]any{"id": user.ID, "plan": user.Plan}, // user.id, user.plan
+    "order": map[string]any{"total_pence": total},
+})
+```
+
+Nested maps flatten to dotted attributes. Each `Set` reaches the span at once,
+so a request that fails halfway still carries what it knew.
+
+### Structured errors
+
+`StructuredError` carries what a user, a support agent and an engineer each
+need. A span that records it (`autotel.Trace` does, for any returned error)
+gains `error.why`, `error.fix`, `error.code`, `error.status` and
+`error.details.*`:
+
+```go
+return &autotel.StructuredError{
+    Message: "Daily limit reached",
+    Why:     "This amount would take today's total past the limit.",
+    Fix:     "The limit resets at midnight.",
+    Code:    "DAILY_LIMIT_EXCEEDED",
+    Status:  429,
+    Cause:   err,
+}
+
+// Where the error is caught:
+parsed := autotel.ParseError(err) // Message, Why, Fix, Link, Code, Status (500 if unset)
+```
+
+`MarshalJSON` never writes `Internal`, so backend-only context cannot reach a
+client through an error response.
+
+### Finding the cohort behind a regression
+
+The `analysis` package runs the core analysis loop in code:
+
+```go
+import "github.com/jagreehal/autotel-go/v2/analysis"
+
+differences := analysis.CompareCohorts(analysis.Options{Outlier: slow, Baseline: normal})
+// differences[0]: {Field: "account.shard", Value: "legacy-core", OutlierFraction: 1, BaselineFraction: 0}
+
+band := analysis.Bucket(float64(amount), []float64{1000, 2000, 5000}) // "1000-2000"
+```
+
 ### Structured Logging
 
-Automatically inject trace context into logs using `log/slog`:
+To ship logs to your OTLP backend, use `autotel.Logger` (see Quick Start step 5). To keep logging to stdout with trace IDs attached, use `log/slog` with the `logging` package:
 
 ```go
 import (
@@ -1094,7 +1192,7 @@ if autotel.IsTracingEnabled(ctx) {
 Production ready. All core features implemented and tested.
 
 **Version:** 2.2.1
-**Go:** 1.25+ (Go 1.26.5 toolchain recommended)
+**Go:** 1.26+
 **License:** MIT
 
 ## Version
@@ -1109,13 +1207,13 @@ version := autotel.GetVersion()
 
 ## Dependencies
 
-This library uses the latest stable versions of dependencies compatible with Go 1.25+:
+This library uses the latest stable versions of dependencies compatible with Go 1.26+:
 
-- **OpenTelemetry**: v1.44.0
-- **OpenTelemetry Contrib**: v0.69.0
+- **OpenTelemetry**: v1.46.0
+- **OpenTelemetry Contrib**: v0.71.0
 - **Gin**: v1.12.0
-- **Testify**: v1.11.1 (latest)
-- **gRPC**: v1.83.0
+- **Testify**: v1.12.1 (latest)
+- **gRPC**: v1.84.0
 
 All dependencies are kept up-to-date and verified for compatibility.
 

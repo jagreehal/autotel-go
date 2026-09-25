@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,4 +90,50 @@ func TestHTTPSEndpointIgnoresInsecureDefault(t *testing.T) {
 	_, span := autotel.Start(context.Background(), "test-span")
 	span.End()
 	cleanup()
+}
+
+// Each signal reaches its own OTLP path, for both endpoint forms. A collector
+// answers any other path with 404.
+func TestEachSignalReachesItsOwnPath(t *testing.T) {
+	var mu sync.Mutex
+	paths := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths[r.URL.Path] = true
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	for _, endpoint := range []string{server.URL, server.Listener.Addr().String()} {
+		clear(paths)
+
+		_, err := autotel.Init(context.Background(),
+			autotel.WithService("paths"),
+			autotel.WithDebug(false),
+			autotel.WithEndpoint(endpoint),
+			autotel.WithInsecure(true),
+			autotel.WithSampler(sdktrace.AlwaysSample()),
+		)
+		if err != nil {
+			t.Fatalf("Init %s: %v", endpoint, err)
+		}
+
+		ctx, span := autotel.Start(context.Background(), "unit")
+		autotel.Meter().Counter(ctx, "units", 1, nil)
+		autotel.Logger("paths").InfoContext(ctx, "hello")
+		span.End()
+
+		if err := autotel.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown %s: %v", endpoint, err)
+		}
+
+		mu.Lock()
+		for _, want := range []string{"/v1/traces", "/v1/metrics", "/v1/logs"} {
+			if !paths[want] {
+				t.Errorf("endpoint %s: nothing posted to %s (got %v)", endpoint, want, paths)
+			}
+		}
+		mu.Unlock()
+	}
 }

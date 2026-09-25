@@ -74,8 +74,9 @@ func TestQueue_Track(t *testing.T) {
 	assert.Len(t, events, 1)
 	assert.Equal(t, "test_event", events[0].name)
 	assert.Equal(t, "value", events[0].properties["key"])
-	assert.NotEmpty(t, events[0].properties["trace_id"])
-	assert.NotEmpty(t, events[0].properties["span_id"])
+	// The IDs match the span exactly, so an event leads back to its trace.
+	assert.Equal(t, span.SpanContext().TraceID().String(), events[0].properties["trace_id"])
+	assert.Equal(t, span.SpanContext().SpanID().String(), events[0].properties["span_id"])
 }
 
 func TestQueue_Track_NoSpan(t *testing.T) {

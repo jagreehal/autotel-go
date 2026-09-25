@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	otlpmetrichttp "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -104,15 +107,33 @@ func initWithConfig(ctx context.Context, cfg *Config) (func(), error) {
 		return nil, err
 	}
 
-	tp, err := buildTracerProvider(ctx, res, mergedCfg)
+	mp, err := setupMetrics(ctx, res, mergedCfg)
 	if err != nil {
 		return nil, err
 	}
 
+	lp, err := setupLogs(ctx, res, mergedCfg)
+	if err != nil {
+		shutdownPartial(mp, nil)
+		return nil, err
+	}
+
+	tp, err := buildTracerProvider(ctx, res, mergedCfg)
+	if err != nil {
+		shutdownPartial(mp, lp)
+		return nil, err
+	}
+
 	otel.SetTracerProvider(tp)
+	// The global propagator lets otelhttp and otelgrpc middleware continue the
+	// trace named in an incoming traceparent header.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 	setupGlobalFeatures(mergedCfg)
 
-	return createCleanupFunc(tp), nil
+	return createCleanupFunc(tp, mp, lp), nil
 }
 
 // resolveAndMergeConfig resolves configs from all sources and merges them.
@@ -126,6 +147,7 @@ func resolveAndMergeConfig(explicit *Config) *Config {
 
 	merged := mergeConfigs(explicit, yamlCfg, envCfg)
 	applyBackendPreset(merged)
+	applyDevtools(merged)
 	return merged
 }
 
@@ -175,13 +197,13 @@ func buildTracerProvider(ctx context.Context, res *resource.Resource, cfg *Confi
 		return nil, err
 	}
 
-	if err := setupMetrics(ctx, res, cfg); err != nil {
-		return nil, err
-	}
-
 	tailPolicy := endPolicyFor(cfg)
 	processors := buildSpanProcessors(exportersList, cfg, tailPolicy)
-	sampler := withGuards(selectSampler(cfg, tailPolicy != nil), cfg)
+	sampler := selectSampler(cfg, tailPolicy != nil)
+	if cfg.DebugCapture {
+		sampler = debugCaptureSampler{next: sampler}
+	}
+	sampler = withGuards(sampler, cfg)
 
 	providerOpts := []trace.TracerProviderOption{
 		trace.WithResource(res),
@@ -332,18 +354,35 @@ func setupGlobalFeatures(cfg *Config) {
 	}
 }
 
-// createCleanupFunc creates the cleanup function for graceful shutdown.
-func createCleanupFunc(tp *trace.TracerProvider) func() {
-	return func() {
-		_ = tp.Shutdown(context.Background())
+// createCleanupFunc creates the cleanup function for graceful shutdown, and
+// makes these providers the ones Flush and Shutdown act on.
+//
+// Shutting each provider down flushes what its batch processor or periodic
+// reader holds. mp and lp are nil when their signal is disabled.
+func createCleanupFunc(tp *trace.TracerProvider, mp *sdkmetric.MeterProvider, lp *sdklog.LoggerProvider) func() {
+	p := &pipeline{tp: tp, mp: mp, lp: lp}
+	current.Store(p)
 
-		globalTrackerMu.Lock()
-		if globalTracker != nil {
-			_ = globalTracker.Shutdown(context.Background())
-			globalTracker = nil
-		}
-		globalTrackerMu.Unlock()
+	return func() { _ = p.shutdown(context.Background()) }
+}
+
+var warnNoSubscribers sync.Once
+
+// currentTracker returns the event queue Init built, or nil when Init was
+// given no subscribers. The nil case warns once, so a missing
+// WithSubscribers shows up on the first Track.
+func currentTracker() EventTracker {
+	globalTrackerMu.RLock()
+	tracker := globalTracker
+	globalTrackerMu.RUnlock()
+
+	if tracker == nil {
+		warnNoSubscribers.Do(func() {
+			slog.Warn("[autotel] Track called but Init was given no subscribers; events are dropped. Pass WithSubscribers(...) to Init.")
+		})
 	}
+
+	return tracker
 }
 
 // Track sends an analytics event to the global queue (if configured).
@@ -357,9 +396,7 @@ func createCleanupFunc(tp *trace.TracerProvider) func() {
 //	    "plan":    "premium",
 //	})
 func Track(ctx context.Context, event string, properties map[string]any) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker != nil {
 		tracker.Track(ctx, event, properties)
@@ -375,9 +412,7 @@ func Track(ctx context.Context, event string, properties map[string]any) {
 //	    "user_id": userID,
 //	})
 func TrackFunnelStep(ctx context.Context, funnelName string, step FunnelStatus, properties map[string]any) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker == nil {
 		return
@@ -403,9 +438,7 @@ func TrackFunnelStep(ctx context.Context, funnelName string, step FunnelStatus, 
 //	    "user_id": userID,
 //	})
 func TrackFunnelProgression(ctx context.Context, funnelName string, stepName string, stepNumber int, properties map[string]any) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker == nil {
 		return
@@ -432,9 +465,7 @@ func TrackFunnelProgression(ctx context.Context, funnelName string, stepName str
 //	    "amount": 99.99,
 //	})
 func TrackOutcome(ctx context.Context, operationName string, outcome OutcomeStatus, properties map[string]any) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker == nil {
 		return
@@ -460,9 +491,7 @@ func TrackOutcome(ctx context.Context, operationName string, outcome OutcomeStat
 //	    "currency": "USD",
 //	})
 func TrackValue(ctx context.Context, name string, value float64, properties map[string]any) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker == nil {
 		return
@@ -488,9 +517,7 @@ func TrackValue(ctx context.Context, name string, value float64, properties map[
 //	    {Name: "button_click", Properties: map[string]any{"button": "signup"}},
 //	})
 func TrackBatch(ctx context.Context, events []Event) {
-	globalTrackerMu.RLock()
-	tracker := globalTracker
-	globalTrackerMu.RUnlock()
+	tracker := currentTracker()
 
 	if tracker == nil {
 		return
@@ -501,21 +528,21 @@ func TrackBatch(ctx context.Context, events []Event) {
 	}
 }
 
-func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) error {
+func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) (*sdkmetric.MeterProvider, error) {
 	if !cfg.MetricsEnabled {
-		return nil
+		return nil, nil
 	}
 
 	exportersList := cfg.MetricExporters
 	if len(exportersList) == 0 {
 		if cfg.Endpoint == "" {
 			// No exporter configured and no endpoint provided; skip metrics setup.
-			return nil
+			return nil, nil
 		}
 
 		exp, err := newOTLPMetricsExporter(ctx, cfg)
 		if err != nil {
-			return fmt.Errorf("failed to create metrics exporter: %w", err)
+			return nil, fmt.Errorf("failed to create metrics exporter: %w", err)
 		}
 		exportersList = append(exportersList, exp)
 	}
@@ -527,7 +554,7 @@ func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) erro
 
 	mp := sdkmetric.NewMeterProvider(providerOpts...)
 	otel.SetMeterProvider(mp)
-	return nil
+	return mp, nil
 }
 
 func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporter, error) {
@@ -607,6 +634,7 @@ func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, err
 const (
 	tracesPath  = "/v1/traces"
 	metricsPath = "/v1/metrics"
+	logsPath    = "/v1/logs"
 )
 
 // endpointIsURL reports whether the configured endpoint is a full URL
@@ -626,11 +654,13 @@ func endpointIsURL(endpoint string) bool {
 // in OTLP terms, so the signal path belongs on the end of it. WithEndpointURL
 // takes the path as complete and does not append anything, so a base carrying a
 // path of its own — Langfuse's /api/public/otel, PostHog's /i, a Grafana gateway
-// path — would otherwise have traces posted to the base itself. A base with no
-// path needs no help: the exporter already falls back to the default signal path.
+// path — would otherwise have traces posted to the base itself.
+//
+// A base with no path gets the signal path too, so the exporter posts to
+// /v1/traces whatever its own default.
 func signalEndpointURL(base, signalPath string) string {
 	parsed, err := url.Parse(base)
-	if err != nil || parsed.Path == "" || parsed.Path == "/" {
+	if err != nil {
 		return base
 	}
 	// Respect an endpoint that already names the signal explicitly.

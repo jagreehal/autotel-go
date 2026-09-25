@@ -18,9 +18,14 @@ var (
 
 func init() {
 	// Check for debug environment variable
-	if os.Getenv("AUTOTEL_DEBUG") == "true" || os.Getenv("AUTOTEL_DEBUG") == "1" {
+	if envDebugSet() {
 		EnableDebug()
 	}
+}
+
+// envDebugSet reports whether AUTOTEL_DEBUG asks for debug output.
+func envDebugSet() bool {
+	return os.Getenv("AUTOTEL_DEBUG") == "true" || os.Getenv("AUTOTEL_DEBUG") == "1"
 }
 
 func IsProduction() bool {
