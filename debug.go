@@ -38,7 +38,7 @@ func ShouldEnableDebug(debug *bool) bool {
 	if debug != nil {
 		return *debug
 	}
-	return !IsProduction()
+	return envDebugSet() || !IsProduction()
 }
 
 // EnableDebug enables debug mode, which logs all span operations.
@@ -104,7 +104,11 @@ func debugSpanError(ctx trace.SpanContext, err error) {
 	if !IsDebugEnabled() {
 		return
 	}
-	debugPrint("  Record error: %v [trace_id=%s]", err, ctx.TraceID().String())
+	text := err.Error()
+	if redactor := currentRedactor(); redactor != nil {
+		text = redactor.Redact("exception.message", text)
+	}
+	debugPrint("  Record error: %s [trace_id=%s]", text, ctx.TraceID().String())
 }
 
 // DebugPrinter provides a structured way to print debug information.

@@ -1,6 +1,7 @@
 package autotel
 
 import (
+	"sync/atomic"
 	"time"
 
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -11,7 +12,6 @@ import (
 	"github.com/jagreehal/autotel-go/v2/processors"
 	"github.com/jagreehal/autotel-go/v2/ratelimit"
 	"github.com/jagreehal/autotel-go/v2/redaction"
-	"github.com/jagreehal/autotel-go/v2/sampling"
 )
 
 // Protocol defines the OTLP protocol to use
@@ -63,7 +63,8 @@ type Config struct {
 	// Insecure controls whether to use insecure connections (default: true for development)
 	Insecure bool
 
-	// Sampler is the trace sampler to use (default: AdaptiveSampler)
+	// Sampler is the trace sampler to use (default: keep every trace, following
+	// the caller's decision when there is one)
 	Sampler trace.Sampler
 
 	// Production hardening features
@@ -145,14 +146,88 @@ type Config struct {
 	MetricExporters []metric.Exporter
 	MetricInterval  time.Duration
 
+	// RuntimeMetrics reports Go runtime metrics (memory, GC, goroutines).
+	RuntimeMetrics bool
+
 	// Logs control. OTEL_LOGS_EXPORTER=none also disables log export.
 	LogsEnabled  bool
 	LogExporters []sdklog.Exporter
+
+	// LogFile also writes Logger output to rolling files.
+	LogFile *LogFile
+
+	// These record that a value was chosen, which matters when it equals the
+	// default: a default gives way to lower layers, a choice doesn't.
+	protocolChosen    bool
+	versionChosen     bool
+	environmentChosen bool
+
+	// Bad values from the environment, which matter only if nothing outranks them.
+	protocolEnvErr error
+	samplerEnvErr  error
+
+	// spanExportFailure is where span exporters leave their latest error.
+	spanExportFailure *atomic.Pointer[error]
+
+	// signals holds per-signal settings that only the environment can set.
+	signals struct{ traces, metrics, logs signalEnv }
+
+	// debugRequested records that debug mode was asked for, rather than being on
+	// because ENV isn't production. Only a requested debug overrules a sampler.
+	debugRequested bool
 
 	// optionErrors collects validation failures raised by options, so a bad
 	// vendor preset surfaces as an Init error rather than panicking or silently
 	// exporting nowhere. Append via OptionError.
 	optionErrors []error
+}
+
+// signalEnv is what OTEL_* variables say about one signal.
+type signalEnv struct {
+	Endpoint string // used verbatim: no signal path is appended
+	Headers  map[string]string
+	Disabled bool // OTEL_{TRACES,METRICS,LOGS}_EXPORTER=none
+}
+
+// fillZeroValues gives a hand-built Config working numbers. A zero batch timeout
+// or queue size builds a processor that spins and exports nothing. The booleans
+// can't be told from a choice, so start from DefaultConfig to get those.
+func fillZeroValues(cfg *Config) {
+	defaults := defaultConfig()
+	durations := []struct{ value, fallback *time.Duration }{
+		{&cfg.BatchTimeout, &defaults.BatchTimeout},
+		{&cfg.MetricInterval, &defaults.MetricInterval},
+		{&cfg.EventFlushInterval, &defaults.EventFlushInterval},
+		{&cfg.EventBackoffMin, &defaults.EventBackoffMin},
+		{&cfg.EventBackoffMax, &defaults.EventBackoffMax},
+		{&cfg.EventCBReset, &defaults.EventCBReset},
+	}
+	for _, d := range durations {
+		if *d.value <= 0 {
+			*d.value = *d.fallback
+		}
+	}
+	counts := []struct{ value, fallback *int }{
+		{&cfg.MaxQueueSize, &defaults.MaxQueueSize},
+		{&cfg.MaxExportBatchSize, &defaults.MaxExportBatchSize},
+		{&cfg.EventQueueSize, &defaults.EventQueueSize},
+		{&cfg.EventCBThreshold, &defaults.EventCBThreshold},
+	}
+	for _, c := range counts {
+		if *c.value <= 0 {
+			*c.value = *c.fallback
+		}
+	}
+	if cfg.Sampler == nil {
+		cfg.Sampler = defaults.Sampler
+	}
+}
+
+// defaultSampler keeps every trace. Dropping data is a cost decision for the
+// person running the service, so sampling is opt-in: see WithAdaptiveSampler,
+// WithTargetRateSampler and OTEL_TRACES_SAMPLER.
+func defaultSampler() trace.Sampler {
+	return trace.ParentBased(trace.AlwaysSample())
 }
 
 // OptionError records a validation failure on the config. Options that can fail
@@ -190,8 +265,7 @@ func defaultConfig() *Config {
 		Endpoint:           "",
 		Protocol:           ProtocolHTTP,
 		Insecure:           true,
-		Sampler:            sampling.NewAdaptiveSampler(), // Use adaptive sampler by default
-		UseAdaptiveSampler: true,
+		Sampler:            defaultSampler(),
 		BatchTimeout:       5 * time.Second,
 		MaxQueueSize:       2048,
 		MaxExportBatchSize: 512,

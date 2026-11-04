@@ -1,0 +1,33 @@
+name: Release
+
+# The Go proxy serves a module as soon as a tag exists, so there is nothing to
+# publish. This fails loudly when a tag doesn't match what it claims to release.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify the tagged release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+
+      - name: Tag matches version.go
+        run: |
+          VERSION=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go)
+          test "v${VERSION}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v${VERSION}"; exit 1; }
+
+      - name: Changelog has this version
+        run: grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md
+
+      - run: go mod tidy -diff
+      - run: go test -race ./...

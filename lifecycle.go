@@ -11,6 +11,8 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/trace"
+
+	"github.com/jagreehal/autotel-go/v2/internal/rotatefile"
 )
 
 // pipeline is what one Init built: a provider per signal. mp and lp are nil
@@ -19,6 +21,11 @@ type pipeline struct {
 	tp *trace.TracerProvider
 	mp *sdkmetric.MeterProvider
 	lp *sdklog.LoggerProvider
+
+	file    *rotatefile.Writer
+	tracker EventTracker
+
+	spanExportFailure *atomic.Pointer[error]
 
 	// A second shutdown, from Shutdown and a deferred cleanup both, reports
 	// the first one's result rather than the metric reader's "already shut
@@ -57,6 +64,7 @@ func Flush(ctx context.Context) error {
 	if p.lp != nil {
 		errs = append(errs, p.lp.ForceFlush(ctx))
 	}
+	errs = append(errs, p.lastSpanExportError())
 
 	return errors.Join(errs...)
 }
@@ -92,29 +100,65 @@ func (p *pipeline) shutdown(ctx context.Context) error {
 		p.err = p.close(ctx)
 		if p.err != nil {
 			p.err = fmt.Errorf("autotel: telemetry not delivered; "+
-				"is a receiver listening at the configured endpoint? %w", p.err)
+				"check the endpoint, and any credentials in its headers: %w", p.err)
 		}
 	})
 
 	return p.err
 }
 
-func (p *pipeline) close(ctx context.Context) error {
-	var errs []error
-	errs = append(errs, p.tp.Shutdown(ctx))
-	if p.mp != nil {
-		errs = append(errs, p.mp.Shutdown(ctx))
+// lastSpanExportError is the error from the latest span export, if it failed.
+func (p *pipeline) lastSpanExportError() error {
+	if failure := p.spanExportFailure.Load(); failure != nil {
+		return *failure
 	}
-	if p.lp != nil {
-		errs = append(errs, p.lp.Shutdown(ctx))
+	return nil
+}
+
+// close stops everything at once. They share ctx's deadline, so in sequence a
+// stuck trace export would use it up and leave logs and events unflushed.
+func (p *pipeline) close(ctx context.Context) error {
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	run := func(stop func(context.Context) error) {
+		wg.Go(func() {
+			err := stop(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			errs = append(errs, err)
+		})
 	}
 
-	globalTrackerMu.Lock()
-	if globalTracker != nil {
-		errs = append(errs, globalTracker.Shutdown(ctx))
-		globalTracker = nil
+	run(p.tp.Shutdown)
+	if p.mp != nil {
+		run(p.mp.Shutdown)
 	}
-	globalTrackerMu.Unlock()
+	if p.lp != nil {
+		run(p.lp.Shutdown)
+	}
+	if p.tracker != nil {
+		globalTrackerMu.Lock()
+		if globalTracker == p.tracker {
+			globalTracker = nil
+		}
+		globalTrackerMu.Unlock()
+		run(p.tracker.Shutdown)
+	}
+	wg.Wait()
+
+	errs = append(errs, p.lastSpanExportError())
+
+	// A pipeline an Init has replaced no longer decides where logs go.
+	if current.Load() == p {
+		logsStayLocal.Store(true)
+	}
+	if p.file != nil {
+		logFileSink.CompareAndSwap(p.file, nil)
+		errs = append(errs, p.file.Close())
+	}
 
 	return errors.Join(errs...)
 }

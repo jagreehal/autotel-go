@@ -51,8 +51,9 @@ func (s *spanImpl) SetAttribute(key string, value any) {
 		return
 	}
 
-	s.span.SetAttributes(redactedAttribute(key, value))
-	debugSpanAttribute(s.span.SpanContext(), key, value)
+	attr := redactedAttribute(key, value)
+	s.span.SetAttributes(attr)
+	debugSpanAttribute(s.span.SpanContext(), key, attr.Value.AsInterface())
 }
 
 // redactedAttribute converts a value to an OpenTelemetry attribute, applying
@@ -60,31 +61,10 @@ func (s *spanImpl) SetAttribute(key string, value any) {
 // value onto a span goes through here, so a redacted field cannot reappear
 // unredacted in an event.
 func redactedAttribute(key string, value any) attribute.KeyValue {
-	// Convert value to string for PII redaction check
-	strValue := fmt.Sprintf("%v", value)
-
-	// Apply PII redaction if enabled
-	mu.RLock()
-	pr := globalPIIRedactor
-	mu.RUnlock()
-	if pr != nil {
-		originalValue := strValue
-		strValue = pr.Redact(key, strValue)
-		if strValue != originalValue {
-			debugPrint("  🔒 PII redacted: %s [original=%v, redacted=%s]", key, value, strValue)
-		}
-	}
-
-	// Convert value to OpenTelemetry attribute
 	var attr attribute.KeyValue
 	switch v := value.(type) {
 	case string:
-		// Use redacted value if it was modified
-		if pr != nil {
-			attr = attribute.String(key, strValue)
-		} else {
-			attr = attribute.String(key, v)
-		}
+		attr = attribute.String(key, v)
 	case int:
 		attr = attribute.Int(key, v)
 	case int64:
@@ -105,10 +85,12 @@ func redactedAttribute(key string, value any) attribute.KeyValue {
 	case []bool:
 		attr = attribute.BoolSlice(key, v)
 	default:
-		// Use redacted string value
-		attr = attribute.String(key, strValue)
+		attr = attribute.String(key, fmt.Sprintf("%v", value))
 	}
 
+	if redactor := currentRedactor(); redactor != nil {
+		attr.Value = redactValue(redactor, key, attr.Value)
+	}
 	return attr
 }
 

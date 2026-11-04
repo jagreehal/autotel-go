@@ -143,10 +143,12 @@ func yamlToConfig(yaml *yamlConfig) *Config {
 	}
 	if yaml.Exporter.Protocol != "" {
 		switch strings.ToLower(yaml.Exporter.Protocol) {
-		case "http":
+		case "http", "http/protobuf":
 			cfg.Protocol = ProtocolHTTP
 		case "grpc":
 			cfg.Protocol = ProtocolGRPC
+		default:
+			cfg.OptionError(fmt.Errorf("autotel: YAML exporter.protocol %q is not one of http/protobuf, grpc", yaml.Exporter.Protocol))
 		}
 	}
 	if len(yaml.Exporter.Headers) > 0 {

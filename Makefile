@@ -1,4 +1,4 @@
-.PHONY: help quality test lint format coverage build clean ci
+.PHONY: help quality test lint format coverage build clean ci workshop
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -19,6 +19,9 @@ coverage: ## Run tests with coverage report
 	@go test -coverprofile=coverage.out ./...
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+workshop: ## Run every workshop part against a fake receiver
+	@go run ./workshop/check
 
 # Linting and formatting
 lint: ## Run linters

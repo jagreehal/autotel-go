@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-04
+
+### Added
+
+- `OTEL_*` coverage: `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, per-signal `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` and `_HEADERS`, and the protocol values `http/protobuf` and `http/json`.
+- `Init` logs where each signal goes, or that telemetry stays local.
+- `database` package: `Trace`, `WithTransaction`, `RegisterPoolMetrics` and `SanitizeQuery` for `database/sql`, with no new dependency.
+- `genai` package: `Trace`, `RecordUsage` and `RecordEvaluation`, with the GenAI semantic conventions and metrics.
+- The Go OpenTelemetry Workshop in `workshop/`, checked by `go run ./workshop/check`.
+- `WithLogFile` and `AUTOTEL_LOG_FILE_*` write rolling log files.
+- `WithRuntimeMetrics` reports Go runtime metrics.
+- `HTTPMiddleware` options: `WithSkipPaths`, `WithTraceResponseHeader` and `WithTrustForwardedFor`.
+- `middleware.ChiMiddleware` and `ChiMiddlewareOn` wrap [`otelchi`](https://github.com/riandyrn/otelchi), the standard Chi instrumentation (otel-contrib has none). `ChiMiddlewareOn` passes the router through `WithChiRoutes`, so span names use route templates from the start.
+- `middleware.EchoMiddleware` wraps LabStack [`echo-otel/v4`](https://github.com/labstack/echo-otel). Contrib `otelecho` is deprecated.
+
+### Changed
+
+- `QUICKSTART.md` is gone. The README starts with the same steps, and the deeper
+  guides moved to `docs/`.
+- **Breaking: every trace is kept by default.** The default was the adaptive sampler, which dropped about 90% of successful spans, so a first request usually never appeared. Expect more export volume if you relied on it. To sample, add `autotel.WithAdaptiveSampler()` or set `OTEL_TRACES_SAMPLER`.
+- **Breaking: `HTTPMiddleware` names spans after the route:** `GET /orders/{id}` with `http.route` set, or plain `GET` when no `ServeMux` route matched. It used the raw path, a new span name per ID. Update dashboards that match on names.
+- **Breaking: `HTTPMiddleware` records the TCP peer as `client.address`.** `X-Forwarded-For` could spoof it. Add `WithTrustForwardedFor()` behind a proxy. Chi, Gin and Echo keep their own rules; see [HTTP and gRPC](docs/http-and-grpc.md).
+- **Breaking, rarely: `HTTPMiddleware` and `GinMiddleware` are variadic.** Calls are unchanged, but assigning either to a `func(string) …` variable won't compile.
+- `GinMiddleware` records `url.path` where the old span had `http.target`.
+- Invalid `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_TRACES_SAMPLER` or `AUTOTEL_LOG_FILE_*` values fail `Init` instead of being ignored, unless an option outranks the variable.
+- A sampler you chose now applies when debug is on only because `ENV` isn't production. `WithDebug(true)` and `AUTOTEL_DEBUG` still keep everything.
+- `Logger` prints to stderr when `Init` built no log pipeline, instead of dropping records.
+- Without `WithService`, the service name and version come from the binary's build info instead of `unknown-service`.
+- OpenTelemetry 1.47, contrib 0.72 and gRPC 1.85. The logs API is now v1.47 and stable. `gin-contrib/sse` stays on v1.1.2 to keep the minimum Go at 1.26.0.
+- `middleware.GinMiddleware` wraps contrib [`otelgin`](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin) instead of a hand-rolled span, as `HTTPMiddleware` wraps `otelhttp`.
+
+### Fixed
+
+- **`WithCircuitBreaker` works.** Nothing reported failures to it, so it never
+  opened. Failed span exports now open it.
+- `Shutdown` and `Flush` report failed span exports. A traces-only setup such as
+  Jaeger reported success while delivering nothing.
+- `WithSubscribers` with a custom subscriber fails `Init` with the import to add,
+  when it used to succeed and drop every event.
+- `IsTracingEnabled` no longer adds a `_check` span to your traces.
+- **Security: telemetry headers could go out in cleartext.** Rotate any key sent in these setups. An `https://` endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT` or YAML lost its scheme and fell back to plain HTTP. A TLS endpoint set in code, `backends.Honeycomb` for one, was downgraded when the environment held an `http://` OTLP endpoint or `OTEL_EXPORTER_OTLP_INSECURE=true`, a normal Kubernetes setup. Every exporter now gets an explicit URL.
+- **Security: the resource no longer carries `process.command_args` or `process.owner`.** Flags such as `--password=…` reached the backend.
+- `WithPIIRedaction` covers every signal: spans from any source, including middleware it never reached before, logs (OTLP, stderr and files), `autotel.Meter()` metrics and `autotel.Track` events. Debug output no longer prints the original value.
+- A hand-built `*Config` with zero batch or queue sizes exported nothing and spun a core. Zero values now get defaults.
+- A sampler set on `Config`, or by `backends.Honeycomb`, was ignored unless `ENV=production`, so Honeycomb reweighted unsampled data.
+- A failed `Init` no longer disturbs a running pipeline, and a stale cleanup no longer shuts down the event tracker of a newer `Init`.
+- `Shutdown` stops every signal at once, so a stuck export can't use up the deadline and leave the others unflushed.
+- A YAML file that doesn't parse, or an unknown YAML protocol, fails `Init` instead of dropping the file silently.
+- `WithEnvironment`, `WithServiceVersion` and `WithProtocol` win even when they name the default, `WithBackend` respects `WithProtocol` and explicit headers, and headers from different layers merge ignoring case.
+- `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` took no effect through `Init`, and YAML `service.version` and `service.environment` were discarded, because the defaults in the explicit layer overwrote them.
+- `WithService` and other options now beat `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`, as documented. `resource.WithFromEnv` let them win.
+- `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_RESOURCE_ATTRIBUTES` values are percent-decoded, so `Authorization=Basic%20...` reaches the backend intact.
+- `OTEL_METRICS_EXPORTER=none` and `OTEL_TRACES_EXPORTER=none` are honoured.
+- `AUTOTEL_DEBUG` works when `ENV=production`.
+- Debug mode keeps every span. It announced `AlwaysSample`, but a tail policy still applied the adaptive baseline.
+
 ## [2.3.0] - 2026-09-25
 
 ### Added

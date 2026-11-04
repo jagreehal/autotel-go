@@ -12,10 +12,8 @@ import (
 //
 // Example:
 //
-//	logger.InfoContext(ctx, "processing user",
-//	    slog.String("user_id", userID),
-//	    logging.WithTraceContext(ctx)...,
-//	)
+//	attrs := append(logging.WithTraceContext(ctx), slog.String("user_id", userID))
+//	logger.LogAttrs(ctx, slog.LevelInfo, "processing user", attrs...)
 func WithTraceContext(ctx context.Context) []slog.Attr {
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {

@@ -48,7 +48,7 @@ func TestShutdownWithNoReceiverGivesUp(t *testing.T) {
 
 	start := time.Now()
 	err = autotel.Shutdown(ctx)
-	if err == nil || !strings.Contains(err.Error(), "receiver listening") {
+	if err == nil || !strings.Contains(err.Error(), "check the endpoint") {
 		t.Fatalf("err %v, want the no-receiver explanation", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {

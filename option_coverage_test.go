@@ -54,6 +54,8 @@ var verifiedElsewhere = map[string]string{
 	// are asserted against recording metric and log exporters.
 	"WithMetricExporters": "signals_test.go",
 	"WithLogs":            "signals_test.go",
+	"WithLogFile":         "logs_local_test.go",
+	"WithRuntimeMetrics":  "logs_local_test.go",
 	"WithLogExporters":    "signals_test.go",
 }
 

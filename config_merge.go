@@ -1,5 +1,11 @@
 package autotel
 
+import (
+	"strings"
+
+	"go.opentelemetry.io/otel/sdk/trace"
+)
+
 // mergeConfigs merges configs in priority order: explicit > yaml > env > defaults
 // The explicit config has the highest priority and overrides everything.
 // YAML config overrides env vars, and env vars override defaults.
@@ -25,6 +31,22 @@ func applyEnvLayer(target *Config, env *Config) {
 	applyProtocolIfSet(&target.Protocol, env.Protocol)
 	target.Headers = copyMapIfSet(target.Headers, env.Headers)
 	target.ResourceAttributes = copyMapIfSet(target.ResourceAttributes, env.ResourceAttributes)
+	target.signals = env.signals
+	target.LogFile = env.LogFile
+	if env.samplerChosen {
+		target.Sampler = env.Sampler
+		target.samplerChosen = true
+		target.UseAdaptiveSampler = false
+	}
+}
+
+// overrideSignalEndpoints makes a higher layer's Endpoint win over the
+// per-signal variables below it. OTEL_*_EXPORTER=none stays: it is an off switch.
+func overrideSignalEndpoints(target *Config) {
+	for _, signal := range []*signalEnv{&target.signals.traces, &target.signals.metrics, &target.signals.logs} {
+		signal.Endpoint = ""
+		signal.Headers = nil
+	}
 }
 
 // applyYAMLLayer applies YAML config (middle priority for mergeable fields).
@@ -33,12 +55,19 @@ func applyYAMLLayer(target *Config, yaml *Config) {
 		return
 	}
 
+	yieldToResourceName(target, yaml)
 	applyStringIfSet(&target.ServiceName, yaml.ServiceName)
 	applyStringIfSet(&target.ServiceVersion, yaml.ServiceVersion)
 	applyStringIfSet(&target.Environment, yaml.Environment)
 	applyStringIfSet(&target.Endpoint, yaml.Endpoint)
+	if yaml.Endpoint != "" {
+		overrideSignalEndpoints(target)
+	}
 	applyProtocolIfSet(&target.Protocol, yaml.Protocol)
-	target.Headers = mergeMapIfSet(target.Headers, yaml.Headers)
+	if yaml.Protocol != "" {
+		target.protocolChosen = true
+	}
+	target.Headers = mergeHeaders(target.Headers, yaml.Headers)
 	target.ResourceAttributes = mergeMapIfSet(target.ResourceAttributes, yaml.ResourceAttributes)
 
 	if yaml.Debug != nil {
@@ -72,19 +101,76 @@ func applyExplicitLayer(target *Config, explicit *Config) {
 	target.Headers = layered.Headers
 	target.ResourceAttributes = layered.ResourceAttributes
 	target.Debug = layered.Debug
+	target.signals = layered.signals
+	if explicit.LogFile == nil {
+		target.LogFile = layered.LogFile
+	}
+
+	// A sampler left at its default doesn't outrank OTEL_TRACES_SAMPLER. Any other
+	// was chosen, including one set on the struct or by a vendor preset.
+	if !explicit.samplerChosen && samplerIsDefault(explicit.Sampler) {
+		target.Sampler = layered.Sampler
+		target.samplerChosen = layered.samplerChosen
+	} else {
+		target.samplerChosen = true
+	}
 
 	// Explicit still wins over both lower layers.
+	yieldToResourceName(target, explicit)
 	applyExplicitString(&target.ServiceName, explicit.ServiceName, defaultServiceName)
-	applyStringIfSet(&target.ServiceVersion, explicit.ServiceVersion)
-	applyStringIfSet(&target.Environment, explicit.Environment)
+	applyChosenString(&target.ServiceVersion, explicit.ServiceVersion, defaultServiceVersion, explicit.versionChosen)
+	applyChosenString(&target.Environment, explicit.Environment, defaultEnvironment, explicit.environmentChosen)
 	applyStringIfSet(&target.Endpoint, explicit.Endpoint)
-	applyProtocolIfSet(&target.Protocol, explicit.Protocol)
-	target.Headers = mergeMapIfSet(target.Headers, explicit.Headers)
+	if explicit.Endpoint != "" {
+		overrideSignalEndpoints(target)
+	}
+	// Protocol has a default too, so only a choice outranks the lower layers.
+	target.protocolChosen = layered.protocolChosen
+	if explicit.protocolChosen || (explicit.Protocol != "" && explicit.Protocol != ProtocolHTTP) {
+		target.Protocol = explicit.Protocol
+		target.protocolChosen = true
+	}
+	target.Headers = mergeHeaders(target.Headers, explicit.Headers)
 	target.ResourceAttributes = mergeMapIfSet(target.ResourceAttributes, explicit.ResourceAttributes)
 
 	if explicit.Debug != nil {
 		target.Debug = explicit.Debug
 	}
+}
+
+// samplerIsDefault reports whether sampler is unset or the one defaultConfig
+// installs. Samplers aren't comparable, so this goes by description.
+func samplerIsDefault(sampler trace.Sampler) bool {
+	return sampler == nil || sampler.Description() == defaultSampler().Description()
+}
+
+// yieldToResourceName lets a layer that names the service through its resource
+// attributes outrank a ServiceName from the layers below it.
+func yieldToResourceName(target, layer *Config) {
+	if _, named := layer.ResourceAttributes["service.name"]; named &&
+		(layer.ServiceName == "" || layer.ServiceName == defaultServiceName) {
+		target.ServiceName = defaultServiceName
+	}
+}
+
+// applyChosenString sets target if source was chosen or differs from the default.
+func applyChosenString(target *string, source, defaultVal string, chosen bool) {
+	if source != "" && (chosen || source != defaultVal) {
+		*target = source
+	}
+}
+
+// mergeHeaders is mergeMapIfSet for HTTP headers, whose names ignore case: left
+// as two keys, the winner would come down to map iteration order.
+func mergeHeaders(target, source map[string]string) map[string]string {
+	for key := range source {
+		for existing := range target {
+			if existing != key && strings.EqualFold(existing, key) {
+				delete(target, existing)
+			}
+		}
+	}
+	return mergeMapIfSet(target, source)
 }
 
 // applyStringIfSet sets target to source if source is non-empty.
