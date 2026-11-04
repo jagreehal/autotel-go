@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otlpmetricgrpc "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -25,7 +29,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
+	"github.com/jagreehal/autotel-go/v2/circuitbreaker"
 	"github.com/jagreehal/autotel-go/v2/internal/exporters"
+	"github.com/jagreehal/autotel-go/v2/internal/rotatefile"
 	"github.com/jagreehal/autotel-go/v2/processors"
 	"github.com/jagreehal/autotel-go/v2/sampling"
 )
@@ -42,6 +48,11 @@ var (
 	globalTrackerMu sync.RWMutex
 	queueFactory    func(cfg *Config, subscribers []Subscriber) EventTracker
 )
+
+// errNoQueue explains the one mistake a custom subscriber makes easy. The queue
+// lives in the subscribers package, which only the built-in subscribers import.
+var errNoQueue = errors.New("autotel: WithSubscribers needs the event queue: " +
+	`add import _ "github.com/jagreehal/autotel-go/v2/subscribers"`)
 
 // RegisterQueueFactory registers a function to create analytics queues.
 // This is called by the analytics package to avoid import cycles.
@@ -69,6 +80,9 @@ func Init(ctx context.Context, opts ...Option) (func(), error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if len(cfg.Subscribers) > 0 && queueFactory == nil {
+		cfg.OptionError(errNoQueue)
 	}
 	// Report option validation failures before building anything, so a missing
 	// API key fails loudly at startup instead of exporting into the void.
@@ -100,6 +114,10 @@ func InitWithConfig(ctx context.Context, cfg *Config) (func(), error) {
 
 func initWithConfig(ctx context.Context, cfg *Config) (func(), error) {
 	mergedCfg := resolveAndMergeConfig(cfg)
+	if err := errors.Join(mergedCfg.optionErrors...); err != nil {
+		return nil, err
+	}
+	fillZeroValues(mergedCfg)
 	setupDebugMode(mergedCfg)
 
 	res, err := buildResource(ctx, mergedCfg)
@@ -124,6 +142,24 @@ func initWithConfig(ctx context.Context, cfg *Config) (func(), error) {
 		return nil, err
 	}
 
+	// Last of the steps that can fail: nothing below needs unwinding.
+	file, err := openLogFile(mergedCfg)
+	if err != nil {
+		_ = tp.Shutdown(ctx)
+		shutdownPartial(mp, lp)
+		return nil, err
+	}
+
+	// Nothing global changes until every step has worked, so a failed Init leaves
+	// a running pipeline as it was.
+	installLogSinks(file, lp == nil)
+	if mp != nil {
+		otel.SetMeterProvider(mp)
+	}
+	if lp != nil {
+		otel.SetLoggerProvider(lp)
+	}
+
 	otel.SetTracerProvider(tp)
 	// The global propagator lets otelhttp and otelgrpc middleware continue the
 	// trace named in an incoming traceparent header.
@@ -131,28 +167,83 @@ func initWithConfig(ctx context.Context, cfg *Config) (func(), error) {
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
-	setupGlobalFeatures(mergedCfg)
+	tracker := setupGlobalFeatures(mergedCfg)
+	announce(mergedCfg, mp != nil, lp != nil)
 
-	return createCleanupFunc(tp, mp, lp), nil
+	return createCleanupFunc(tp, mp, lp, file, tracker, mergedCfg.spanExportFailure), nil
+}
+
+// announce logs where each signal is going, so a missing endpoint shows at
+// startup rather than as an empty backend. It goes through slog.Default, so an
+// application's own logger and level apply.
+func announce(cfg *Config, hasMetrics, hasLogs bool) {
+	var targets []string
+	if hasOTLPTraces(cfg) {
+		targets = append(targets, "traces to "+displayEndpoint(cfg.signalEndpoint(cfg.signals.traces, tracesPath), cfg.Protocol))
+	}
+	if hasMetrics && len(cfg.MetricExporters) == 0 {
+		targets = append(targets, "metrics to "+displayEndpoint(cfg.signalEndpoint(cfg.signals.metrics, metricsPath), cfg.Protocol))
+	}
+	if hasLogs && len(cfg.LogExporters) == 0 {
+		targets = append(targets, "logs to "+displayEndpoint(cfg.signalEndpoint(cfg.signals.logs, logsPath), cfg.Protocol))
+	}
+
+	switch {
+	case len(targets) > 0:
+		protocol := "OTLP/HTTP"
+		if cfg.Protocol == ProtocolGRPC {
+			protocol = "OTLP/gRPC"
+		}
+		slog.Info(fmt.Sprintf("autotel: %s: exporting %s over %s", cfg.ServiceName, strings.Join(targets, ", "), protocol))
+	case len(cfg.SpanExporters)+len(cfg.MetricExporters)+len(cfg.LogExporters) == 0:
+		slog.Info(fmt.Sprintf("autotel: %s: no OTLP endpoint, telemetry stays local. Set OTEL_EXPORTER_OTLP_ENDPOINT to export", cfg.ServiceName))
+	}
+}
+
+// displayEndpoint makes an endpoint safe for a log line.
+func displayEndpoint(endpoint string, protocol Protocol) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "(unparseable endpoint)"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	if protocol == ProtocolGRPC {
+		parsed.Path = "" // gRPC routes by service, so the signal path isn't used
+	}
+	return parsed.String()
 }
 
 // resolveAndMergeConfig resolves configs from all sources and merges them.
 func resolveAndMergeConfig(explicit *Config) *Config {
 	envCfg := resolveEnvConfig()
 
-	var yamlCfg *Config
-	if yamlConfig, err := loadYamlConfigFromAutotel(); err == nil && yamlConfig != nil {
-		yamlCfg = yamlConfig
-	}
+	yamlCfg, yamlErr := loadYamlConfigFromAutotel()
 
 	merged := mergeConfigs(explicit, yamlCfg, envCfg)
+	merged.OptionError(yamlErr)
+	if yamlCfg != nil {
+		merged.optionErrors = append(merged.optionErrors, yamlCfg.optionErrors...)
+	}
+	merged.optionErrors = append(merged.optionErrors, envCfg.optionErrors...)
+	// A bad variable only matters if it is the one in charge.
+	if !merged.protocolChosen {
+		merged.OptionError(envCfg.protocolEnvErr)
+	}
+	if !merged.samplerChosen {
+		merged.OptionError(envCfg.samplerEnvErr)
+	}
 	applyBackendPreset(merged)
 	applyDevtools(merged)
+	merged.Endpoint = sanitizeEndpoint(merged.Endpoint)
+	applyBuildInfo(merged)
 	return merged
 }
 
 // setupDebugMode configures debug mode based on config.
 func setupDebugMode(cfg *Config) {
+	cfg.debugRequested = cfg.Debug != nil && *cfg.Debug || envDebugSet()
 	if cfg.Debug == nil {
 		enabled := ShouldEnableDebug(nil)
 		cfg.Debug = &enabled
@@ -167,20 +258,42 @@ func setupDebugMode(cfg *Config) {
 
 // buildResource creates the OpenTelemetry resource with all attributes.
 func buildResource(ctx context.Context, cfg *Config) (*resource.Resource, error) {
-	attrs := []attribute.KeyValue{
-		semconv.ServiceName(cfg.ServiceName),
-		semconv.ServiceVersion(cfg.ServiceVersion),
-		semconv.DeploymentEnvironment(cfg.Environment),
-	}
-
+	attrs := make([]attribute.KeyValue, 0, len(cfg.ResourceAttributes)+3)
 	for k, v := range cfg.ResourceAttributes {
 		attrs = append(attrs, attribute.String(k, v))
 	}
 
+	// Later entries win. A value somebody set beats the same key in resource
+	// attributes; a default gives way to it.
+	identity := func(inAttrs, set bool, attr attribute.KeyValue) {
+		if !inAttrs || set {
+			attrs = append(attrs, attr)
+		}
+	}
+	inAttrs := func(keys ...string) bool {
+		return slices.ContainsFunc(keys, func(key string) bool {
+			_, found := cfg.ResourceAttributes[key]
+			return found
+		})
+	}
+	identity(inAttrs("service.name"), cfg.ServiceName != defaultServiceName, semconv.ServiceName(cfg.ServiceName))
+	identity(inAttrs("service.version"), cfg.versionChosen || cfg.ServiceVersion != defaultServiceVersion,
+		semconv.ServiceVersion(cfg.ServiceVersion))
+	identity(inAttrs("deployment.environment", "deployment.environment.name"),
+		cfg.environmentChosen || cfg.Environment != defaultEnvironment,
+		semconv.DeploymentEnvironment(cfg.Environment))
+
+	// No resource.WithFromEnv: resolveEnvConfig already read those variables, and
+	// the detector would put them above explicit options.
 	res, err := resource.New(ctx,
+		resource.WithTelemetrySDK(),
 		resource.WithAttributes(attrs...),
-		resource.WithFromEnv(),
-		resource.WithProcess(),
+		// Not WithProcess: it adds the command line, and flags can hold secrets.
+		resource.WithProcessPID(),
+		resource.WithProcessExecutableName(),
+		resource.WithProcessRuntimeName(),
+		resource.WithProcessRuntimeVersion(),
+		resource.WithProcessRuntimeDescription(),
 		resource.WithOS(),
 		resource.WithHost(),
 	)
@@ -256,7 +369,13 @@ func buildSpanProcessors(exporters []trace.SpanExporter, cfg *Config, tailPolicy
 // Keeping all errors is not something a head sampler can do: a span's status and
 // duration do not exist when it starts. Those rates therefore travel to a span
 // processor that runs at OnEnd, where the facts are in.
+//
+// A debug session that keeps everything has no tail policy: selectSampler keeps
+// every span there, and a tail applying a baseline would drop most of them again.
 func endPolicyFor(cfg *Config) processors.TailPolicy {
+	if debugKeepsEverySpan(cfg) {
+		return nil
+	}
 	adaptive, ok := cfg.Sampler.(*sampling.AdaptiveSampler)
 	if !ok {
 		return nil
@@ -269,6 +388,33 @@ func endPolicyFor(cfg *Config) processors.TailPolicy {
 	// parents that end afterwards are kept with it, rather than leaving the error
 	// as an orphan with no waterfall around it.
 	return policy.NewKeeper().KeepSpan
+}
+
+// monitoredExporter watches how each export goes, for two listeners the batch
+// processor leaves deaf by dropping export errors: the circuit breaker, which
+// would never open, and Shutdown, which would report success for a traces-only
+// setup that delivered nothing.
+type monitoredExporter struct {
+	trace.SpanExporter
+	breaker *circuitbreaker.CircuitBreaker // nil without WithCircuitBreaker
+	failure *atomic.Pointer[error]         // the latest export's error, nil once one works
+}
+
+func (e *monitoredExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySpan) error {
+	err := e.SpanExporter.ExportSpans(ctx, spans)
+	if err != nil {
+		e.failure.Store(&err)
+	} else {
+		e.failure.Store(nil)
+	}
+	if e.breaker != nil {
+		if err != nil {
+			e.breaker.RecordFailure()
+		} else {
+			e.breaker.RecordSuccess()
+		}
+	}
+	return err
 }
 
 // guardSampler sheds load before a span is built, by asking the configured rate
@@ -320,6 +466,13 @@ func withGuards(sampler trace.Sampler, cfg *Config) trace.Sampler {
 	return guardSampler{next: sampler, guards: guards}
 }
 
+// debugKeepsEverySpan reports whether debug mode overrules the sampler. Debug is
+// on by default outside production, so that default must not silently cancel a
+// sampler someone chose; WithDebug(true) or AUTOTEL_DEBUG does overrule it.
+func debugKeepsEverySpan(cfg *Config) bool {
+	return IsDebugEnabled() && (cfg.debugRequested || !cfg.samplerChosen)
+}
+
 // selectSampler returns the appropriate sampler based on config and debug mode.
 //
 // When a tail policy is in play the head must record every span, because a span
@@ -328,7 +481,7 @@ func withGuards(sampler trace.Sampler, cfg *Config) trace.Sampler {
 // cost is that spans are built in-process before being dropped; export volume
 // still follows the configured rates.
 func selectSampler(cfg *Config, hasTailPolicy bool) trace.Sampler {
-	if IsDebugEnabled() {
+	if debugKeepsEverySpan(cfg) {
 		debugPrint("Using AlwaysSample sampler for debug mode")
 		return trace.AlwaysSample()
 	}
@@ -342,16 +495,25 @@ func selectSampler(cfg *Config, hasTailPolicy bool) trace.Sampler {
 // setupGlobalFeatures configures the globals that are consulted outside the
 // tracer provider. The rate limiter and circuit breaker are not among them: they
 // run inside the sampler, so buildTracerProvider owns them.
-func setupGlobalFeatures(cfg *Config) {
+func setupGlobalFeatures(cfg *Config) EventTracker {
+	// A typed nil would read as a redactor, hence the branch.
 	if cfg.PIIRedactor != nil {
 		setGlobalPIIRedactor(cfg.PIIRedactor)
+	} else {
+		setGlobalPIIRedactor(nil)
 	}
 
-	if len(cfg.Subscribers) > 0 && queueFactory != nil {
-		globalTrackerMu.Lock()
-		globalTracker = queueFactory(cfg, cfg.Subscribers)
-		globalTrackerMu.Unlock()
+	if len(cfg.Subscribers) == 0 || queueFactory == nil {
+		return nil
 	}
+	tracker := queueFactory(cfg, cfg.Subscribers)
+	if cfg.PIIRedactor != nil {
+		tracker = &redactingTracker{EventTracker: tracker, redactor: cfg.PIIRedactor}
+	}
+	globalTrackerMu.Lock()
+	globalTracker = tracker
+	globalTrackerMu.Unlock()
+	return tracker
 }
 
 // createCleanupFunc creates the cleanup function for graceful shutdown, and
@@ -359,8 +521,8 @@ func setupGlobalFeatures(cfg *Config) {
 //
 // Shutting each provider down flushes what its batch processor or periodic
 // reader holds. mp and lp are nil when their signal is disabled.
-func createCleanupFunc(tp *trace.TracerProvider, mp *sdkmetric.MeterProvider, lp *sdklog.LoggerProvider) func() {
-	p := &pipeline{tp: tp, mp: mp, lp: lp}
+func createCleanupFunc(tp *trace.TracerProvider, mp *sdkmetric.MeterProvider, lp *sdklog.LoggerProvider, file *rotatefile.Writer, tracker EventTracker, spanExportFailure *atomic.Pointer[error]) func() {
+	p := &pipeline{tp: tp, mp: mp, lp: lp, file: file, tracker: tracker, spanExportFailure: spanExportFailure}
 	current.Store(p)
 
 	return func() { _ = p.shutdown(context.Background()) }
@@ -529,13 +691,13 @@ func TrackBatch(ctx context.Context, events []Event) {
 }
 
 func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) (*sdkmetric.MeterProvider, error) {
-	if !cfg.MetricsEnabled {
+	if !cfg.MetricsEnabled || cfg.signals.metrics.Disabled {
 		return nil, nil
 	}
 
 	exportersList := cfg.MetricExporters
 	if len(exportersList) == 0 {
-		if cfg.Endpoint == "" {
+		if cfg.signalEndpoint(cfg.signals.metrics, metricsPath) == "" {
 			// No exporter configured and no endpoint provided; skip metrics setup.
 			return nil, nil
 		}
@@ -553,60 +715,32 @@ func setupMetrics(ctx context.Context, res *resource.Resource, cfg *Config) (*sd
 	}
 
 	mp := sdkmetric.NewMeterProvider(providerOpts...)
-	otel.SetMeterProvider(mp)
+	if cfg.RuntimeMetrics {
+		if err := runtime.Start(runtime.WithMeterProvider(mp)); err != nil {
+			shutdownPartial(mp, nil)
+			return nil, fmt.Errorf("failed to start runtime metrics: %w", err)
+		}
+	}
 	return mp, nil
 }
 
 func newOTLPMetricsExporter(ctx context.Context, cfg *Config) (sdkmetric.Exporter, error) {
+	target := cfg.signalEndpoint(cfg.signals.metrics, metricsPath)
+	headers := cfg.signalHeaders(cfg.signals.metrics)
+	timeout := cfg.BatchTimeout + 5*time.Second
 	if cfg.Protocol == ProtocolHTTP {
-		httpOpts := []otlptmetricOption{
-			otlptmetricWithHeaders(cfg.Headers),
-			otlptmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
-		}
-		if endpointIsURL(cfg.Endpoint) {
-			httpOpts = append(httpOpts, otlpmetrichttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
-		} else {
-			httpOpts = append(httpOpts, otlptmetricWithEndpoint(cfg.Endpoint))
-			if cfg.Insecure {
-				httpOpts = append(httpOpts, otlptmetricWithInsecure())
-			}
-		}
-		return otlpmetrichttp.New(ctx, httpOpts...)
+		return otlpmetrichttp.New(ctx,
+			otlpmetrichttp.WithEndpointURL(target),
+			otlpmetrichttp.WithHeaders(headers),
+			otlpmetrichttp.WithTimeout(timeout),
+		)
 	}
-
-	grpcOpts := []otlpgmetricOption{
-		otlpgmetricWithHeaders(cfg.Headers),
-		otlpgmetricWithTimeout(cfg.BatchTimeout + 5*time.Second),
-	}
-	if endpointIsURL(cfg.Endpoint) {
-		grpcOpts = append(grpcOpts, otlpmetricgrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, metricsPath)))
-	} else {
-		grpcOpts = append(grpcOpts, otlpgmetricWithEndpoint(cfg.Endpoint))
-		if cfg.Insecure {
-			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
-		}
-	}
-	return otlpmetricgrpc.New(ctx, grpcOpts...)
+	return otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpointURL(target),
+		otlpmetricgrpc.WithHeaders(headers),
+		otlpmetricgrpc.WithTimeout(timeout),
+	)
 }
-
-// Aliases to keep option slices readable.
-type (
-	otlptmetricOption = otlpmetrichttp.Option
-	otlpgmetricOption = otlpmetricgrpc.Option
-)
-
-func otlptmetricWithEndpoint(e string) otlptmetricOption { return otlpmetrichttp.WithEndpoint(e) }
-func otlptmetricWithHeaders(h map[string]string) otlptmetricOption {
-	return otlpmetrichttp.WithHeaders(h)
-}
-func otlptmetricWithTimeout(d time.Duration) otlptmetricOption { return otlpmetrichttp.WithTimeout(d) }
-func otlptmetricWithInsecure() otlptmetricOption               { return otlpmetrichttp.WithInsecure() }
-
-func otlpgmetricWithEndpoint(e string) otlpgmetricOption { return otlpmetricgrpc.WithEndpoint(e) }
-func otlpgmetricWithHeaders(h map[string]string) otlpgmetricOption {
-	return otlpmetricgrpc.WithHeaders(h)
-}
-func otlpgmetricWithTimeout(d time.Duration) otlpgmetricOption { return otlpmetricgrpc.WithTimeout(d) }
 
 // buildExporters builds the list of span exporters respecting presets and custom exporters.
 func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, error) {
@@ -614,7 +748,7 @@ func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, err
 	exportersList = append(exportersList, cfg.SpanExporters...)
 
 	// Base OTLP exporter (only when endpoint configured)
-	if cfg.Endpoint != "" {
+	if hasOTLPTraces(cfg) {
 		exp, err := newOTLPExporter(ctx, cfg)
 		if err != nil {
 			return nil, err
@@ -622,9 +756,22 @@ func buildExporters(ctx context.Context, cfg *Config) ([]trace.SpanExporter, err
 		exportersList = append(exportersList, exp)
 	}
 
+	// Before the console exporter joins: it can't fail, and a working printer
+	// mustn't report a dead backend as healthy.
+	cfg.spanExportFailure = &atomic.Pointer[error]{}
+	for i, exporter := range exportersList {
+		exportersList[i] = &monitoredExporter{SpanExporter: exporter, breaker: cfg.CircuitBreaker, failure: cfg.spanExportFailure}
+	}
+
 	// Console exporter for debug ergonomics
 	if IsDebugEnabled() {
 		exportersList = append(exportersList, exporters.NewConsoleExporter())
+	}
+
+	if cfg.PIIRedactor != nil {
+		for i, exporter := range exportersList {
+			exportersList[i] = &redactingExporter{SpanExporter: exporter, redactor: cfg.PIIRedactor}
+		}
 	}
 
 	return exportersList, nil
@@ -637,13 +784,55 @@ const (
 	logsPath    = "/v1/logs"
 )
 
-// endpointIsURL reports whether the configured endpoint is a full URL
-// ("https://host:port/path") rather than the bare "host:port" form.
+// hasOTLPTraces reports whether traces go to an OTLP endpoint.
+func hasOTLPTraces(cfg *Config) bool {
+	return !cfg.signals.traces.Disabled && cfg.signalEndpoint(cfg.signals.traces, tracesPath) != ""
+}
+
+// signalEndpoint is the full URL one signal goes to: its own endpoint if the
+// environment gave it one, otherwise the base endpoint with the signal's path.
 //
-// The two forms need different exporter options. WithEndpoint stores the string
-// verbatim as the host, so passing a URL to it yields a mangled target such as
-// "http://http:%2F%2Flocalhost:4318/v1/traces". WithEndpointURL parses the URL
-// properly and derives TLS from the scheme.
+// It is always a URL, for every exporter. The exporters read the OTEL_* variables
+// themselves as defaults, and an option only replaces what it names: given a bare
+// host, they would keep the scheme and path of an http:// variable, sending
+// credentials meant for TLS in cleartext. A URL replaces all three at once.
+func (c *Config) signalEndpoint(signal signalEnv, path string) string {
+	if signal.Endpoint != "" {
+		if endpointIsURL(signal.Endpoint) {
+			return signal.Endpoint
+		}
+		return signalEndpointURL(c.withScheme(signal.Endpoint), path)
+	}
+	if c.Endpoint == "" {
+		return ""
+	}
+	return signalEndpointURL(c.withScheme(c.Endpoint), path)
+}
+
+// withScheme turns a bare host:port into a URL, as Insecure says.
+func (c *Config) withScheme(endpoint string) string {
+	switch {
+	case endpointIsURL(endpoint):
+		return endpoint
+	case c.Insecure:
+		return "http://" + endpoint
+	}
+	return "https://" + endpoint
+}
+
+// signalHeaders is the base headers with the signal's own laid over them.
+func (c *Config) signalHeaders(signal signalEnv) map[string]string {
+	if len(signal.Headers) == 0 {
+		return c.Headers
+	}
+	headers := make(map[string]string, len(c.Headers)+len(signal.Headers))
+	maps.Copy(headers, c.Headers)
+	maps.Copy(headers, signal.Headers)
+	return headers
+}
+
+// endpointIsURL reports whether the endpoint is a URL rather than a bare
+// host:port. sanitizeEndpoint has lowered the scheme by this point.
 func endpointIsURL(endpoint string) bool {
 	return strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://")
 }
@@ -672,74 +861,73 @@ func signalEndpointURL(base, signalPath string) string {
 }
 
 func newOTLPExporter(ctx context.Context, cfg *Config) (trace.SpanExporter, error) {
+	target := cfg.signalEndpoint(cfg.signals.traces, tracesPath)
+	headers := cfg.signalHeaders(cfg.signals.traces)
+	timeout := cfg.BatchTimeout + 5*time.Second
 	if cfg.Protocol == ProtocolHTTP {
-		httpOpts := []otlptracehttp.Option{
-			otlptracehttp.WithHeaders(cfg.Headers),
-			otlptracehttp.WithTimeout(cfg.BatchTimeout + 5*time.Second),
-		}
-		if endpointIsURL(cfg.Endpoint) {
-			// The scheme decides TLS; passing WithInsecure as well would override it.
-			httpOpts = append(httpOpts, otlptracehttp.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
-		} else {
-			httpOpts = append(httpOpts, otlptracehttp.WithEndpoint(cfg.Endpoint))
-			if cfg.Insecure {
-				httpOpts = append(httpOpts, otlptracehttp.WithInsecure())
-			}
-		}
-		return otlptracehttp.New(ctx, httpOpts...)
+		return otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpointURL(target),
+			otlptracehttp.WithHeaders(headers),
+			otlptracehttp.WithTimeout(timeout),
+		)
 	}
-
-	grpcOpts := []otlptracegrpc.Option{
-		otlptracegrpc.WithHeaders(cfg.Headers),
-		otlptracegrpc.WithTimeout(cfg.BatchTimeout + 5*time.Second),
-	}
-	if endpointIsURL(cfg.Endpoint) {
-		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpointURL(signalEndpointURL(cfg.Endpoint, tracesPath)))
-	} else {
-		grpcOpts = append(grpcOpts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
-		if cfg.Insecure {
-			grpcOpts = append(grpcOpts, otlptracegrpc.WithInsecure())
-		}
-	}
-	return otlptracegrpc.New(ctx, grpcOpts...)
+	return otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpointURL(target),
+		otlptracegrpc.WithHeaders(headers),
+		otlptracegrpc.WithTimeout(timeout),
+	)
 }
 
 // applyBackendPreset adjusts config for common vendors while staying OTLP-first.
+// presetProtocol applies a vendor's protocol unless an option named one.
+func presetProtocol(cfg *Config, protocol Protocol) {
+	if !cfg.protocolChosen {
+		cfg.Protocol = protocol
+	}
+}
+
+// presetHeader adds a vendor header unless the configuration already has it.
+func presetHeader(cfg *Config, key, value string) {
+	if value == "" {
+		return
+	}
+	for existing := range cfg.Headers {
+		if strings.EqualFold(existing, key) {
+			return
+		}
+	}
+	cfg.Headers[key] = value
+}
+
 func applyBackendPreset(cfg *Config) {
 	switch strings.ToLower(cfg.BackendPreset) {
 	case "datadog", "dd":
 		if cfg.Endpoint == "" || cfg.Endpoint == "localhost:4318" {
 			cfg.Endpoint = "api.datadoghq.com:443"
 		}
-		cfg.Protocol = ProtocolGRPC
+		presetProtocol(cfg, ProtocolGRPC)
 		cfg.Insecure = false
 		ensureHeaders(cfg)
-		if key := os.Getenv("DD_API_KEY"); key != "" {
-			cfg.Headers["DD-API-KEY"] = key
-		}
+		presetHeader(cfg, "DD-API-KEY", os.Getenv("DD_API_KEY"))
 		cfg.Headers["X-Datadog-Origin"] = "otlp"
 	case "honeycomb", "hny":
 		if cfg.Endpoint == "" || cfg.Endpoint == "localhost:4318" {
 			cfg.Endpoint = "api.honeycomb.io:443"
 		}
-		cfg.Protocol = ProtocolHTTP
+		presetProtocol(cfg, ProtocolHTTP)
 		cfg.Insecure = false
 		ensureHeaders(cfg)
-		if key := os.Getenv("HONEYCOMB_API_KEY"); key != "" {
-			cfg.Headers["x-honeycomb-team"] = key
-		}
-		if dataset := os.Getenv("HONEYCOMB_DATASET"); dataset != "" {
-			cfg.Headers["x-honeycomb-dataset"] = dataset
-		}
+		presetHeader(cfg, "x-honeycomb-team", os.Getenv("HONEYCOMB_API_KEY"))
+		presetHeader(cfg, "x-honeycomb-dataset", os.Getenv("HONEYCOMB_DATASET"))
 	case "grafana", "grafana-cloud", "grafana_cloud":
 		if cfg.Endpoint == "" || cfg.Endpoint == "localhost:4318" {
 			cfg.Endpoint = "otlp-gateway-prod.grafana.net:443"
 		}
-		cfg.Protocol = ProtocolGRPC
+		presetProtocol(cfg, ProtocolGRPC)
 		cfg.Insecure = false
 		ensureHeaders(cfg)
 		if key := os.Getenv("GRAFANA_OTLP_API_KEY"); key != "" {
-			cfg.Headers["Authorization"] = "Bearer " + key
+			presetHeader(cfg, "Authorization", "Bearer "+key)
 		}
 	default:
 		// OTLP defaults already set

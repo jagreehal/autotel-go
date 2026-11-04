@@ -9,5 +9,5 @@ import (
 )
 
 func TestVersion(t *testing.T) {
-	require.Equal(t, "2.3.0", autotel.GetVersion())
+	require.Equal(t, "2.4.0", autotel.GetVersion())
 }

@@ -4,12 +4,15 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
 // SetupTest initializes a test tracer provider with an in-memory exporter.
+// It also installs the W3C tracecontext + baggage propagator so middleware
+// extract/inject behaves like autotel.Init.
 // Returns the exporter and a cleanup function.
 func SetupTest(t interface{ Helper() }) (*InMemoryExporter, func()) {
 	if t != nil {
@@ -32,6 +35,10 @@ func SetupTest(t interface{ Helper() }) (*InMemoryExporter, func()) {
 	)
 
 	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	cleanup := func() {
 		_ = tp.Shutdown(context.Background())

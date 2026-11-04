@@ -1,1230 +1,248 @@
 # autotel-go
 
-<div align="center">
-
 [![Go Reference](https://pkg.go.dev/badge/github.com/jagreehal/autotel-go/v2.svg)](https://pkg.go.dev/github.com/jagreehal/autotel-go/v2)
 [![Go Report Card](https://goreportcard.com/badge/github.com/jagreehal/autotel-go/v2)](https://goreportcard.com/report/github.com/jagreehal/autotel-go/v2)
 
-</div>
+Add OpenTelemetry to a Go service with one function call. `autotel.Init` sets up traces, metrics and logs, and sends them to Grafana, Honeycomb, Datadog, Jaeger or any other backend that speaks OTLP.
 
-OpenTelemetry instrumentation for Go.
+## What you get
 
-- One-line initialization with `Init()` and `Start()` helpers
-- OTLP-first design with subscribers for PostHog, Mixpanel, Amplitude, Webhook, and custom destinations
-- Production features: adaptive sampling, rate limiting, circuit breakers, PII redaction
-- Automatic enrichment: trace context flows into spans, logs, and events
+OpenTelemetry (OTel) is the open standard for reporting what your code does. It gives you three kinds of data:
 
-OpenTelemetry requires significant boilerplate. Autotel provides a simpler API while maintaining full control over your telemetry.
+| Data | Answers | Example |
+| --- | --- | --- |
+| Traces | Where did this request spend its time? | `checkout` took 850ms, and `charge card` took 800ms of that |
+| Metrics | How is the whole service doing? | 12 errors a minute, 300ms at p95 |
+| Logs | What happened at this moment? | `order placed`, linked to the trace it belongs to |
 
-```bash
+A **trace** is a tree of **spans**, and a span is one timed step of the work. **OTLP** is the format that carries all three to your backend.
+
+Wiring this up by hand takes [90 lines and eight modules](docs/manual-setup.md). With autotel you write one call.
+
+## See your first trace
+
+You need Go 1.26 and Node.js. Allow five minutes.
+
+**1. Start a local viewer** and leave it running:
+
+```sh
+npx autotel-devtools
+```
+
+**2. Create a project** in a second terminal:
+
+```sh
+mkdir hello && cd hello
+go mod init hello
 go get github.com/jagreehal/autotel-go/v2
 ```
 
-## Quick Start
-
-### 1. Initialize once at startup
+**3. Save this as `main.go`:**
 
 ```go
-import "github.com/jagreehal/autotel-go/v2"
+package main
 
-func main() {
-    cleanup, err := autotel.Init(context.Background(),
-        autotel.WithService("my-service"),
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer cleanup()
-}
-```
-
-`cleanup` flushes and closes every pipeline. To learn whether the last batch
-was delivered, call `autotel.Shutdown(ctx)` instead: it returns an error when no
-receiver acknowledged the export, and gives up after `ShutdownTimeout` (5s) when
-`ctx` has no deadline. `autotel.Flush(ctx)` sends what is buffered and keeps
-running.
-
-**Configuration options:**
-
-- Environment variables: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`, `AUTOTEL_DEBUG`, etc.
-- Explicit parameters override env vars
-- No OTLP exporters run unless you set `WithEndpoint(...)` or the OTEL env vars—making debug-only or subscriber-only setups zero-config.
-- Vendor presets (OTLP-first): `WithBackend("datadog"|"honeycomb"|"grafana")` sets endpoint + headers; use `WithHeaders` for API keys/datasets without extra SDKs.
-- Metrics on by default: OTLP metric exporter is wired alongside traces. Toggle with `WithMetrics(false)` or customize with `WithMetricExporters`/`WithMetricInterval`.
-
-#### Environment variables (optional)
-
-You can configure autotel-go entirely via standard OTEL env vars. An explicit option wins over YAML, and YAML over the environment, so a variable fills in only what the code left unset:
-
-- `OTEL_SERVICE_NAME` – used when `WithService` is not given.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` – host:port or URL; when set we enable OTLP trace + metric exporters.
-- `OTEL_EXPORTER_OTLP_PROTOCOL` – `http` (default) or `grpc`.
-- `OTEL_EXPORTER_OTLP_HEADERS` – comma-separated `key=value` pairs for API keys/datasets.
-- `OTEL_RESOURCE_ATTRIBUTES` – comma-separated `key=value` attributes (e.g., `service.version=1.0.0,deployment.environment=prod`).
-- `AUTOTEL_DEBUG` – `1/true` to mirror `WithDebug(true)` without code changes.
-
-Environment values are sanitized (e.g., stripping `http://` prefixes) so you can copy URLs from docs without worrying about exporter formatting.
-
-### 2. Instrument code with `Start()`
-
-```go
-import "github.com/jagreehal/autotel-go/v2"
-
-func CreateUser(ctx context.Context, data UserData) (*User, error) {
-    ctx, span := autotel.Start(ctx, "CreateUser")
-    defer span.End()
-
-    span.SetAttribute("user.email", data.Email)
-
-    user, err := db.Users.Create(ctx, data)
-    if err != nil {
-        span.RecordError(err)
-        return nil, err
-    }
-
-    return user, nil
-}
-```
-
-- Errors are recorded automatically with `Trace()` helper
-- Works with any context-aware code
-
-### 3. Track product events
-
-```go
 import (
-    "github.com/jagreehal/autotel-go/v2"
-    "github.com/jagreehal/autotel-go/v2/subscribers"
-)
+	"context"
+	"log"
+	"time"
 
-cleanup, err := autotel.Init(context.Background(),
-    autotel.WithService("my-service"),
-    autotel.WithSubscribers(
-        subscribers.NewPostHogSubscriber("phc_..."),
-    ),
-)
-defer cleanup()
-
-func ProcessOrder(ctx context.Context, order Order) error {
-    ctx, span := autotel.Start(ctx, "ProcessOrder")
-    defer span.End()
-
-    // Events automatically include trace_id and span_id
-    autotel.Track(ctx, "order.completed", map[string]any{
-        "amount": order.Total,
-    })
-
-    return charge(order)
-}
-```
-
-Every span, log, and event includes `trace_id` and `span_id` automatically.
-
-### 4. Capture metrics with trace correlation
-
-```go
-import "github.com/jagreehal/autotel-go/v2"
-
-m := autotel.Meter()
-m.Counter(ctx, "checkout.requests", 1, map[string]any{"region": "iad"})
-m.Histogram(ctx, "checkout.latency_ms", float64(duration.Milliseconds()), nil)
-// a span in ctx is attached as an exemplar (trace_id/span_id), never as a metric label
-```
-
-Event delivery is hardened by default (buffer=1000, backoff 100ms→5s, circuit threshold=5, reset every 10s). Tune with `WithEventQueue`, `WithEventBackoff`, and `WithEventRetry`.
-
-### 5. Export logs over OTLP
-
-```go
-logger := autotel.Logger("checkout") // call after Init
-
-ctx, span := autotel.Start(ctx, "ProcessOrder")
-defer span.End()
-logger.InfoContext(ctx, "order placed", "order_id", id)
-// the record carries trace_id/span_id, so your backend links it to the trace
-```
-
-Log export follows the same rules as metrics: on by default, active once an endpoint (or `WithLogExporters`) is set. Turn it off with `WithLogs(false)` or `OTEL_LOGS_EXPORTER=none`. `cleanup()` flushes spans, metrics and logs.
-
-### Trace propagation across services
-
-`Init` installs the W3C `traceparent` and `baggage` propagators globally. `middleware.HTTPMiddleware`, the gRPC interceptors and `NewHTTPClient` use them, so a request that crosses services stays one trace.
-
-## Features
-
-- ✅ **One-line initialization** - No boilerplate
-- ✅ **Ergonomic API** - `Start()` and `Trace()` helpers
-- ✅ **Production-ready** - Adaptive sampling, rate limiting, circuit breakers
-- ✅ **PII redaction** - Built-in PII detection and redaction
-- ✅ **Event tracking** - PostHog, Mixpanel, Amplitude, Webhook subscribers
-- ✅ **Framework integrations** - HTTP server/client, gRPC server/client, Gin middleware
-- ✅ **Event-driven tracing** - Message queues, workflows/sagas, business baggage
-- ✅ **SLO tracking** - Rolling SLIs, error-budget burn alerts, and predictive forecasts
-- ✅ **Vendor lock-in free** - Uses standard OpenTelemetry, works with any OTLP backend
-
-## Comparison
-
-| Feature             | Raw OpenTelemetry                 | autotel-go                |
-| ------------------- | --------------------------------- | ------------------------- |
-| Initialization      | 20-30 lines                       | 1 line (`Init()`)         |
-| Span creation       | `tracer.Start()` + manual `End()` | `Start()` with defer      |
-| Error recording     | Manual                            | Automatic with `Trace()`  |
-| Adaptive sampling   | ❌ (collector only)               | ✅ Built-in               |
-| Rate limiting       | ❌                                | ✅ Built-in               |
-| PII redaction       | ❌                                | ✅ Built-in               |
-| Product events      | ❌                                | ✅ Built-in (subscribers) |
-| HTTP middleware     | Manual setup                      | `HTTPMiddleware()`        |
-| HTTP client         | Manual propagation                | `NewHTTPClient()`         |
-| Message queues      | Manual spans + propagation        | `messaging.Consumer/Producer` |
-| Workflow/Saga       | ❌                                | `workflow.New()` with compensations |
-| Business baggage    | Manual + no guardrails            | `baggage.New()` with PII hashing |
-| Convenience helpers | Manual                            | ✅ Built-in               |
-
-## Basic Usage
-
-### Simple function tracing
-
-```go
-func GetUser(ctx context.Context, id string) (*User, error) {
-    ctx, span := autotel.Start(ctx, "GetUser")
-    defer span.End()
-
-    span.SetAttribute("user.id", id)
-    return db.Users.FindByID(ctx, id)
-}
-```
-
-### With Trace() helper
-
-```go
-func CreateUser(ctx context.Context, data UserData) (*User, error) {
-    return autotel.Trace(ctx, "CreateUser", func(ctx context.Context, span autotel.Span) (*User, error) {
-        span.SetAttribute("user.email", data.Email)
-        return db.Users.Create(ctx, data)
-    })
-}
-```
-
-### HTTP middleware (net/http)
-
-```go
-import (
-    "net/http"
-    "github.com/jagreehal/autotel-go/v2/middleware"
+	"github.com/jagreehal/autotel-go/v2"
 )
 
 func main() {
-    mux := http.NewServeMux()
-    mux.HandleFunc("/users", handleUsers)
+	ctx := context.Background()
 
-    handler := middleware.HTTPMiddleware("my-service")(mux)
-    http.ListenAndServe(":8080", handler)
+	cleanup, err := autotel.Init(ctx, autotel.WithService("hello"), autotel.WithDevtools())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cleanup() // sends anything still buffered before the program exits
+
+	checkout(ctx)
+}
+
+func checkout(ctx context.Context) {
+	ctx, span := autotel.Start(ctx, "checkout")
+	defer span.End()
+
+	span.SetAttribute("order.id", "ord_42")
+	autotel.Logger("hello").InfoContext(ctx, "order placed")
+	charge(ctx)
+}
+
+func charge(ctx context.Context) {
+	_, span := autotel.Start(ctx, "charge card")
+	defer span.End()
+
+	time.Sleep(50 * time.Millisecond) // pretend to call a payment provider
 }
 ```
 
-### Gin middleware
+**4. Run it** with `go run .`, then open <http://127.0.0.1:4318>.
+
+You'll see a `checkout` trace with `charge card` nested inside it, and the `order placed` log attached.
+
+One rule makes the nesting work: `Start` returns a new `ctx`, and you pass that `ctx` down. Go code already does this for cancellation, so tracing usually fits the functions you have.
+
+## Add it to your service
+
+Call `Init` once in `main`. Shut down on SIGTERM so the last batch gets sent:
 
 ```go
-import (
-    "github.com/gin-gonic/gin"
-    "github.com/jagreehal/autotel-go/v2/middleware"
-)
-
 func main() {
-    r := gin.Default()
-    r.Use(middleware.GinMiddleware("my-service"))
-    r.GET("/users/:id", handleGetUser)
-    r.Run(":8080")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cleanup, err := autotel.Init(ctx, autotel.WithService("orders"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer cleanup()
+
+	// run your service until ctx is done
 }
 ```
 
-### gRPC instrumentation
+Leave out `WithService` and the name and version come from your binary's build info. At startup, `Init` logs where your telemetry is going.
+
+### Trace a function
+
+`Trace` opens and closes the span for you, and records a returned error:
 
 ```go
-import (
-    "google.golang.org/grpc"
-    "github.com/jagreehal/autotel-go/v2/middleware"
-)
-
-// Server
-server := grpc.NewServer(
-    grpc.StatsHandler(middleware.GRPCServerHandler()),
-)
-
-// Client
-conn, err := grpc.NewClient("localhost:50051",
-    grpc.WithStatsHandler(middleware.GRPCClientHandler()),
-)
+user, err := autotel.Trace(ctx, "load user", func(ctx context.Context, span autotel.Span) (*User, error) {
+	span.SetAttribute("user.id", id)
+	return db.FindUser(ctx, id)
+})
 ```
 
-### Service-to-Service HTTP Calls
+Put IDs in attributes and keep them out of span names, so your backend can group the spans.
 
-When making HTTP requests to other services, trace context must be propagated via W3C `traceparent` headers for distributed tracing to work.
-
-**Option 1: TracedHTTPClient (recommended)**
+### Trace an HTTP server
 
 ```go
-import "github.com/jagreehal/autotel-go/v2/middleware"
+mux := http.NewServeMux()
+mux.HandleFunc("GET /users/{id}", handleUser)
 
-// Create a traced client - just works!
+handler := middleware.HTTPMiddleware("orders",
+	middleware.WithSkipPaths("/healthz"), // keep probes out of your traces
+)(mux)
+http.ListenAndServe(":8080", handler)
+```
+
+Each request gets a span named after its route, such as `GET /users/{id}`, plus latency metrics. Using Chi, Gin or Echo? See [HTTP and gRPC](docs/http-and-grpc.md).
+
+### Call other services
+
+Use the traced client and the next service joins the same trace:
+
+```go
 client := middleware.NewHTTPClient()
-
-// All requests automatically include traceparent headers
 resp, err := client.Get(ctx, "https://api.example.com/users")
-resp, err := client.Post(ctx, "https://api.example.com/orders", "application/json", jsonData)
-resp, err := client.Put(ctx, "https://api.example.com/users/123", "application/json", jsonData)
-resp, err := client.Delete(ctx, "https://api.example.com/users/123")
 ```
 
-**Option 2: Wrap existing client**
+### Write logs
 
 ```go
-// Wrap an existing client while preserving its settings
-existingClient := &http.Client{Timeout: 60 * time.Second}
-tracedClient := middleware.WrapHTTPClient(existingClient)
-
-resp, err := tracedClient.Get(ctx, "https://api.example.com/users")
+logger := autotel.Logger("orders")
+logger.InfoContext(ctx, "order placed", "order.id", id)
 ```
 
-**Option 3: Use the transport directly**
+Use the `...Context` methods. They attach the trace ID, so your backend can jump from a log line to its trace. With nowhere to export, logs print to stderr. To send all your `slog` output this way, call `slog.SetDefault(logger)`.
+
+### Record metrics
 
 ```go
-// For custom HTTP client configurations
-client := &http.Client{
-    Transport: middleware.NewHTTPTransport(&http.Transport{
-        MaxIdleConns:    100,
-        IdleConnTimeout: 90 * time.Second,
-    }),
-    Timeout: 30 * time.Second,
-}
-
-req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-resp, err := client.Do(req)
+autotel.Meter().Counter(ctx, "orders.placed", 1, map[string]any{"plan": "pro"})
+autotel.Meter().Histogram(ctx, "checkout.total", 42.5, nil)
 ```
 
-**Option 4: Manual header injection**
+Keep metric attributes to a small set of values. Each new value starts a new time series, so `plan` works and `user.id` doesn't.
+
+### Trace database and LLM calls
 
 ```go
-// For cases where you can't change the client
-req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-middleware.InjectHeaders(ctx, req)
-resp, err := http.DefaultClient.Do(req)
-```
-
-**Configuration options:**
-
-```go
-client := middleware.NewHTTPClient(
-    middleware.WithTimeout(10 * time.Second),           // Request timeout
-    middleware.WithSpanNameFormatter(func(req *http.Request) string {
-        return fmt.Sprintf("HTTP %s %s", req.Method, req.URL.Host)
-    }),
-    middleware.WithoutSpans(),                          // Propagate headers without creating spans
-    middleware.WithResponseStatus(),                    // Record HTTP status in span (default: on)
-)
-```
-
-**What gets propagated:**
-
-- `traceparent` header (W3C Trace Context)
-- `tracestate` header (vendor-specific context)
-- `baggage` header (cross-cutting concerns)
-
-## Event-Driven Tracing
-
-### Message Queue Tracing
-
-Trace message producers and consumers with automatic link-based context propagation:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/messaging"
-
-// Producer - publishes messages with trace context
-producer := messaging.NewProducer(
-    messaging.WithProducerSystem(messaging.SystemKafka),
-    messaging.WithProducerDestination("orders"),
-)
-
-err := producer.Publish(ctx, &msg, func(ctx context.Context) error {
-    return kafkaProducer.Send(msg)
-})
-
-// Consumer - processes messages with automatic link extraction
-consumer := messaging.NewConsumer(
-    messaging.WithSystem(messaging.SystemKafka),
-    messaging.WithDestination("orders"),
-    messaging.WithConsumerGroup("order-processor"),
-    messaging.WithLinks(), // Links mode (default) - creates new trace linked to producer
-)
-
-err := consumer.Process(ctx, msg, func(ctx context.Context, span trace.Span) error {
-    return processOrder(ctx, msg)
+err := database.Trace(ctx, database.Call{
+	System: "postgresql", Operation: "SELECT", Namespace: "shop", Collection: "users",
+	Query: query, // recorded with its values removed
+}, func(ctx context.Context) error {
+	return db.QueryRowContext(ctx, query, id).Scan(&name)
 })
 ```
 
-**Batch processing with fan-in links:**
+`genai.Trace` does the same for LLM calls and records token usage. See [Databases and LLM calls](docs/database-and-llm.md).
+
+### Test your telemetry
 
 ```go
-processor := messaging.NewBatchProcessor(
-    messaging.WithBatchSystem(messaging.SystemKafka),
-    messaging.WithBatchDestination("events"),
-)
+import autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 
-// Process entire batch (creates links to all producer spans)
-err := processor.Process(ctx, messages, func(ctx context.Context, span trace.Span) (int, error) {
-    return processBatch(ctx, messages)
-})
-```
+func TestCheckout(t *testing.T) {
+	exporter, cleanup := autoteltesting.SetupTest(t)
+	defer cleanup()
 
-**DLQ and retry tracking:**
+	checkout(context.Background())
 
-```go
-// Record when message is sent to Dead Letter Queue
-messaging.RecordDLQ(ctx, messaging.DLQInfo{
-    OriginalDestination: "orders",
-    DLQDestination:      "orders.dlq",
-    Reason:              "max_retries_exceeded",
-    RetryCount:          3,
-})
-
-// Record retry attempts
-messaging.RecordRetry(ctx, messaging.RetryInfo{
-    Attempt:     2,
-    MaxAttempts: 3,
-    BackoffMs:   1000,
-})
-
-// Record consumer lag metrics
-messaging.RecordConsumerLag(ctx, messaging.ConsumerLagInfo{
-    LagMs:       1500,
-    LagMessages: 100,
-    Partition:   0,
-})
-```
-
-### Workflow/Saga Tracing
-
-Trace distributed transactions with automatic compensation on failure:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/workflow"
-
-wf := workflow.New(ctx, "order-fulfillment")
-
-wf.Step("validate", func(ctx context.Context, span trace.Span) error {
-    return validateOrder(ctx, order)
-})
-
-wf.Step("charge", func(ctx context.Context, span trace.Span) error {
-    return chargeCustomer(ctx, order)
-}, workflow.WithCompensation(func(ctx context.Context, span trace.Span) error {
-    return refundCustomer(ctx, order) // Runs automatically if later step fails
-}))
-
-wf.Step("ship", func(ctx context.Context, span trace.Span) error {
-    return shipOrder(ctx, order)
-}, workflow.WithCompensation(func(ctx context.Context, span trace.Span) error {
-    return cancelShipment(ctx, order)
-}))
-
-// Run workflow - compensations run in reverse order on failure
-if err := wf.Run(ctx); err != nil {
-    // charge failed? → refund runs
-    // ship failed? → cancelShipment runs, then refund runs
-    return err
+	if _, ok := exporter.GetSpanByName("checkout"); !ok {
+		t.Fatal("no checkout span")
+	}
 }
 ```
 
-### Business Baggage (Safe Context Propagation)
+## Send it to a backend
 
-Propagate business context across services with PII protection:
+You change environment variables and leave your code alone.
 
-```go
-import "github.com/jagreehal/autotel-go/v2/baggage"
-
-// Configure allowed keys and PII handling
-bc := baggage.NewWithProfile(&baggage.Profile{
-    AllowedKeys:    map[string]bool{"tenant_id": true, "user_id": true, "user_tier": true},
-    HashKeys:       map[string]bool{"user_id": true}, // Auto-hash PII
-    MaxValueLength: 256,
-})
-
-// Set baggage (PII is automatically hashed; keys off the allowlist are dropped)
-ctx, _ = bc.Set(ctx, "tenant_id", "acme-corp")
-ctx, _ = bc.Set(ctx, "user_id", "user@example.com") // → stored as SHA256 hash
-
-// Quick helper for multiple values (uses the default profile)
-ctx = baggage.WithBusinessContext(ctx,
-    "tenant_id", "acme-corp",
-    "correlation_id", "abc-123",
-)
-```
-
-### Consumer Group Tracking
-
-Track Kafka consumer group lifecycle events:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/messaging"
-
-tracker := messaging.NewConsumerGroupTracker(
-    messaging.WithConsumerGroupID("order-processor"),
-    messaging.WithMemberID("consumer-1"),
-    messaging.WithOnRebalance(func(event messaging.RebalanceEvent) {
-        log.Printf("Rebalance: %s", event.Type)
-    }),
-)
-
-// Record rebalance events
-tracker.RecordRebalance(ctx, messaging.RebalanceEvent{
-    Type:       messaging.RebalanceAssigned,
-    Partitions: []messaging.PartitionAssignment{{Topic: "orders", Partition: 0}},
-    Timestamp:  time.Now(),
-    Generation: 5,
-})
-
-// Record heartbeat health
-tracker.RecordHeartbeat(ctx, true, 5*time.Millisecond)
-
-// Record partition lag
-tracker.RecordPartitionLag(ctx, messaging.PartitionLagInfo{
-    Topic:         "orders",
-    Partition:     0,
-    CurrentOffset: 1000,
-    EndOffset:     1050,
-    Lag:           50,
-})
-```
-
-### Message Ordering & Deduplication
-
-Track message ordering and detect duplicates:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/messaging"
-
-tracker := messaging.NewOrderingTracker(
-    messaging.WithDeduplicationWindowSize(5000),
-    messaging.WithDeduplicationWindowDuration(10*time.Minute),
-    messaging.WithOnDuplicate(func(ctx context.Context, msgID string) {
-        log.Printf("Duplicate message: %s", msgID)
-    }),
-)
-
-result := tracker.CheckAndTrack(ctx, messaging.OrderedMessage{
-    ID:        msg.ID(),
-    Sequence:  msg.Offset,
-    Partition: msg.Partition,
-    Topic:     msg.Topic,
-})
-
-switch result {
-case messaging.OrderingDuplicate:
-    return nil // Skip duplicate
-case messaging.OrderingOutOfOrder:
-    log.Printf("Out of order message")
-case messaging.OrderingGap:
-    log.Printf("Gap detected - missing messages")
-}
-```
-
-### Enhanced DLQ with Reason Categories
-
-Categorize DLQ routing for better filtering:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/messaging"
-
-// Record with category
-messaging.RecordDLQ(ctx, messaging.DLQInfo{
-    QueueName:       "orders-dlq",
-    ReasonCategory:  messaging.DLQReasonValidation, // validation, timeout, poison, etc.
-    OriginalMessageID: msg.ID(),
-    ProducerHeaders: msg.Headers(), // For linking to producer span
-    DwellTimeMs:     1500,
-})
-
-// Auto-classify errors
-category := messaging.ClassifyDLQReason(err) // Returns appropriate category
-
-// Track DLQ replays
-messaging.RecordDLQReplay(ctx, messaging.DLQReplayInfo{
-    SourceDLQ:     "orders-dlq",
-    TargetTopic:   "orders",
-    MessageID:     msg.ID(),
-    ReplayAttempt: 1,
-    ReplayedBy:    "dlq-replay-service",
-})
-```
-
-### Webhook/Parking Lot Pattern
-
-Trace async operations that complete hours/days later (webhooks, payment callbacks):
-
-```go
-import "github.com/jagreehal/autotel-go/v2/webhook"
-
-store := webhook.NewInMemoryStore()
-lot := webhook.NewParkingLot(store, webhook.WithDefaultTTL(24*time.Hour))
-
-// When initiating payment
-func initiatePayment(ctx context.Context, orderID string) error {
-    ctx, span := tracer.Start(ctx, "initiate-payment")
-    defer span.End()
-
-    // Park trace context before async call
-    err := lot.Park(ctx, "payment:"+orderID, webhook.WithMetadata(map[string]string{
-        "order_id": orderID,
-    }))
-    if err != nil {
-        return err
-    }
-
-    return stripe.CreatePaymentIntent(orderID)
-}
-
-// When webhook arrives (hours later)
-func handleWebhook(ctx context.Context, event StripeEvent) error {
-    orderID := event.Data.Object.Metadata["order_id"]
-
-    // Retrieve parked context and create linked span
-    ctx, span, sc := lot.RetrieveAndTrace(ctx, "payment:"+orderID, "stripe.webhook.payment_succeeded")
-    defer span.End()
-
-    if sc != nil {
-        log.Printf("Payment completed after %dms", sc.ElapsedMs())
-    }
-
-    return fulfillOrder(ctx, orderID)
-}
-```
-
-### Safe Baggage Schema
-
-Type-validated baggage with PII detection:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/baggage"
-
-schema := baggage.NewSchema(
-    baggage.WithMaxTotalSize(8192),
-    baggage.WithStrictMode(true),
-).
-    DefineStringField("tenant_id", 64, true).           // Required, max 64 chars
-    DefineHashedField("user_id").                       // Auto-hash for privacy
-    DefineEnumField("priority", []string{"low", "normal", "high"}).
-    DefinePIIField("notes")                              // Auto-detect & redact PII
-
-sb := baggage.NewSafeBaggage(schema)
-
-// Values are validated and transformed
-ctx, err := sb.Set(ctx, "tenant_id", "acme-corp")
-ctx, err := sb.Set(ctx, "user_id", "user@example.com") // Stored as hash
-ctx, err := sb.Set(ctx, "priority", "high")
-
-// Check for PII
-detected := schema.DetectPII("Contact: john@example.com")
-// Returns: ["email"]
-
-// Validate required fields
-missing := sb.CheckRequiredFields(ctx)
-```
-
-### Workflow Step Linking & Retry
-
-Link workflow steps and configure retry behavior:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/workflow"
-
-wf := workflow.New(ctx, "order-fulfillment")
-
-wf.Step("validate", validateOrder)
-
-wf.Step("charge", chargeCustomer,
-    workflow.WithLinkToPrevious(),           // Link to validate step
-    workflow.WithRetry(workflow.RetryConfig{
-        MaxAttempts: 3,
-        BackoffMs:   100,
-        Multiplier:  2.0,
-        MaxBackoff:  5000,
-    }),
-    workflow.WithIdempotent(),               // Mark as safe to retry
-    workflow.WithCompensation(refundCustomer),
-)
-
-wf.Step("ship", shipOrder,
-    workflow.WithLinkTo("validate", "charge"), // Link to multiple steps
-    workflow.WithCompensation(cancelShipment),
-)
-
-if err := wf.Run(ctx); err != nil {
-    return err
-}
-```
-
-### Links-Based Sampling
-
-Sample consumer spans when linked to sampled producer spans:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/sampling"
-
-// Configure sampler with links-based sampling
-sampler := sampling.NewAdaptiveSampler(
-    sampling.WithBaselineRate(0.1),  // 10% baseline
-    sampling.WithLinksBased(true),   // Enable links-based sampling
-    sampling.WithLinksRate(1.0),     // 100% when linked to sampled span
-)
-
-// Create links from message headers
-link, ok := sampling.CreateLinkFromHeaders(msg.Headers)
-if ok {
-    ctx, span := tracer.Start(ctx, "process-message", trace.WithLinks(link))
-    defer span.End()
-}
-
-// Batch: extract links from multiple messages
-links := sampling.ExtractLinksFromBatch(messages, func(m Message) map[string]string {
-    return m.Headers
-})
-```
-
-### Local development with autotel-devtools
-
-[`autotel-devtools`](https://www.npmjs.com/package/autotel-devtools) is a local
-OTLP receiver with a web UI. `WithDevtools` points every signal at it:
+**Grafana Cloud** (find these values under *OpenTelemetry* in your Grafana Cloud stack):
 
 ```sh
-npx autotel-devtools    # listens on http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-<region>.grafana.net/otlp
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic <base64 instance:token>"
 ```
 
-```go
-_, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithDevtools(),
-)
+**Jaeger** stores traces only, so turn the other two off:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_METRICS_EXPORTER=none
+export OTEL_LOGS_EXPORTER=none
 ```
 
-Open <http://127.0.0.1:4318> and traces, metrics and logs appear as they are
-exported. `WithDevtools` changes defaults only: an explicit endpoint or
-`OTEL_EXPORTER_OTLP_ENDPOINT` still wins (run devtools on another port and set
-the variable), every trace is kept unless you chose a sampler, and the stderr
-span printer is off unless `WithDebug` or `AUTOTEL_DEBUG` asks for it.
-
-### Keep one request whatever the sampler decides
-
-With `WithDebugCapture()` in `Init`, a request carrying `autotel.debug` baggage
-keeps every span in every service it reaches, whatever the sampler or tail
-policy decide. The rate limiter and circuit breaker still apply. Set it at the
-edge for one request:
-
-```go
-ctx, err := autotel.SetBaggage(ctx, autotel.DebugBaggageKey, "ticket-4411")
-```
-
-Callers control baggage, so enable the option on services whose callers you
-trust: behind a gateway that sets or strips the key.
-
-`SetBaggage` sets any W3C baggage member. Pair it with
-`WithBaggageAttributes(processors.WithBaggagePrefix(""))` to copy baggage onto
-every span, in this service and downstream.
-
-## Advanced Features
-
-### SLO tracking and burn-rate forecasting
-
-The `slo` package tracks good and bad events over a rolling window, emits
-low-cardinality OpenTelemetry metrics, evaluates dual-window burn-rate alerts,
-and forecasts whether recent failures will exhaust the error budget.
-
-```go
-import (
-    "time"
-
-    "github.com/jagreehal/autotel-go/v2/slo"
-)
-
-tracker, err := slo.NewTracker(slo.Definition{
-    Name:   "checkout.availability",
-    Target: 0.99,
-    Window: 30 * 24 * time.Hour,
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-snapshot, err := tracker.Record(ctx, slo.OutcomeGood)
-if err != nil {
-    log.Fatal(err)
-}
-
-forecast, err := tracker.Forecast(slo.ForecastOptions{
-    Baseline:  6 * time.Hour,
-    Lookahead: 24 * time.Hour, // at most four times the baseline
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-fmt.Printf("current burn: %.2fx, forecast alerting: %t\n",
-    snapshot.BurnRate, forecast.Alerting)
-```
-
-Use `slo.WithClock` for deterministic simulations and tests,
-`slo.WithMetrics(false)` for calculation-only trackers, or `slo.WithMeter` to
-send the `autotel.slo.outcomes` and `autotel.slo.burn_rate` instruments to a
-specific meter provider.
-
-### Wide events: one record per request
-
-`NewRequestLogger` gathers everything a unit of work learned onto the span in
-`ctx`, so one record answers questions nobody planned for:
-
-```go
-event := autotel.NewRequestLogger(ctx)
-defer event.EmitNow() // exactly one record, success or failure
-
-event.Set(map[string]any{
-    "user":  map[string]any{"id": user.ID, "plan": user.Plan}, // user.id, user.plan
-    "order": map[string]any{"total_pence": total},
-})
-```
-
-Nested maps flatten to dotted attributes. Each `Set` reaches the span at once,
-so a request that fails halfway still carries what it knew.
-
-### Structured errors
-
-`StructuredError` carries what a user, a support agent and an engineer each
-need. A span that records it (`autotel.Trace` does, for any returned error)
-gains `error.why`, `error.fix`, `error.code`, `error.status` and
-`error.details.*`:
-
-```go
-return &autotel.StructuredError{
-    Message: "Daily limit reached",
-    Why:     "This amount would take today's total past the limit.",
-    Fix:     "The limit resets at midnight.",
-    Code:    "DAILY_LIMIT_EXCEEDED",
-    Status:  429,
-    Cause:   err,
-}
-
-// Where the error is caught:
-parsed := autotel.ParseError(err) // Message, Why, Fix, Link, Code, Status (500 if unset)
-```
-
-`MarshalJSON` never writes `Internal`, so backend-only context cannot reach a
-client through an error response.
-
-### Finding the cohort behind a regression
-
-The `analysis` package runs the core analysis loop in code:
-
-```go
-import "github.com/jagreehal/autotel-go/v2/analysis"
-
-differences := analysis.CompareCohorts(analysis.Options{Outlier: slow, Baseline: normal})
-// differences[0]: {Field: "account.shard", Value: "legacy-core", OutlierFraction: 1, BaselineFraction: 0}
-
-band := analysis.Bucket(float64(amount), []float64{1000, 2000, 5000}) // "1000-2000"
-```
-
-### Structured Logging
-
-To ship logs to your OTLP backend, use `autotel.Logger` (see Quick Start step 5). To keep logging to stdout with trace IDs attached, use `log/slog` with the `logging` package:
-
-```go
-import (
-    "log/slog"
-    "github.com/jagreehal/autotel-go/v2/logging"
-)
-
-// Option 1: Automatic enrichment with TraceHandler
-logger := slog.New(logging.NewTraceHandler(
-    slog.NewJSONHandler(os.Stdout, nil),
-))
-
-ctx, span := autotel.Start(ctx, "operation")
-defer span.End()
-logger.InfoContext(ctx, "Processing request") // trace_id and span_id automatically added
-
-// Option 2: Manual enrichment
-attrs := logging.WithTraceContext(ctx)
-logger.InfoContext(ctx, "Processing request", slog.Group("trace", attrs...))
-```
-
-### Event Tracking (Product Events)
-
-Track product events with automatic trace context enrichment. Events are sent to subscribers (PostHog, Mixpanel, Amplitude, Webhook, etc.).
-
-**Recommended: Configure subscribers in `Init()`, use global `Track()` function:**
-
-```go
-import (
-    "github.com/jagreehal/autotel-go/v2"
-    "github.com/jagreehal/autotel-go/v2/subscribers"
-)
-
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithSubscribers(
-        subscribers.NewPostHogSubscriber("phc_..."),
-    ),
-)
-defer cleanup()
-
-// Use the global Track function
-ctx, span := autotel.Start(ctx, "userAction")
-autotel.Track(ctx, "user_signed_up", map[string]any{
-    "user_id": "123",
-    "plan":    "premium",
-})
-```
-
-**Manual queue creation (for advanced use cases):**
-
-```go
-import "github.com/jagreehal/autotel-go/v2/subscribers"
-
-// Option 1: PostHog
-queue := subscribers.NewQueue(
-    subscribers.NewPostHogSubscriber("your-posthog-api-key"),
-)
-defer queue.Shutdown(context.Background())
-
-// Option 2: Mixpanel
-queue := subscribers.NewQueue(
-    subscribers.NewMixpanelSubscriber("your-mixpanel-token"),
-)
-
-// Option 3: Amplitude
-queue := subscribers.NewQueue(
-    subscribers.NewAmplitudeSubscriber("your-amplitude-api-key"),
-)
-
-// Option 4: Webhook (for any service)
-queue := subscribers.NewQueue(
-    subscribers.NewWebhookSubscriber("https://api.example.com",
-        subscribers.WithWebhookHeaders(map[string]string{
-            "Authorization": "Bearer your-api-key",
-        }),
-    ),
-)
-
-// Track events (automatically enriched with trace_id and span_id)
-ctx, span := autotel.Start(ctx, "userAction")
-queue.Track(ctx, "user_signed_up", map[string]any{
-    "user_id": "123",
-    "plan":    "premium",
-})
-```
-
-Every event automatically includes `trace_id` and `span_id` in the properties.
-
-## Production Hardening
-
-### Adaptive Sampling
-
-```go
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithAdaptiveSampler(
-        sampling.WithBaselineRate(0.1), // 10% baseline
-        sampling.WithErrorRate(1.0),    // 100% errors
-    ),
-)
-```
-
-The baseline is decided when a span starts, from its trace ID, so a routine trace
-is kept or dropped whole rather than arriving with holes in it.
-
-Errors and slow spans cannot be decided there: neither status nor duration exists
-yet. `Init` therefore records every span in-process and applies these rates when
-the span ends, which is the only point at which "keep every error" can mean
-anything. Export volume still follows the rates you set; the cost is building
-spans that are then dropped locally. Set `WithErrorRate` and `WithSlowRate` no
-higher than the baseline to opt out and decide everything at head.
-
-A span kept for failing may be the only survivor of an otherwise dropped trace —
-a tail decision cannot be propagated back to spans that already ended.
-
-### Target-Rate Sampling
-
-Keep a budget of traces per second instead of a fixed fraction, so nobody re-tunes
-a rate when traffic moves:
-
-```go
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithTargetRateSampler(
-        sampling.WithTargetSpansPerSecond(10),
-        // Optional: apply the budget per route, so one noisy endpoint cannot
-        // spend the allowance a rare one needs.
-        sampling.WithSamplingKey(sampling.KeyByAttributes("http.route")),
-    ),
-)
-```
-
-The rate is recomputed from observed volume once a minute (`WithAdjustInterval`),
-so a change in traffic takes one interval to be reflected. Keys are discovered
-from traffic rather than enumerated in advance, and the tracked set is bounded by
-`WithMaxSamplingKeys` so an unbounded key degrades into inaccuracy rather than
-memory exhaustion.
-
-This decides at span start, so it cannot account for errors or latency — see
-Adaptive Sampling above for those.
-
-### Rate Limiting
-
-```go
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithRateLimit(100, 200), // 100 spans/sec, burst of 200
-)
-```
-
-### Circuit Breaker
-
-```go
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithCircuitBreaker(5, 3, 30*time.Second), // 5 failures, 3 successes, 30s timeout
-)
-```
-
-### PII Redaction
-
-```go
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithPIIRedaction(
-        redaction.WithAllowlistKeys("user_id", "order_id"),
-    ),
-)
-```
-
-## Complete Feature List
-
-### Core Features
-
-- ✅ One-line initialization with environment variable support
-- ✅ Ergonomic `Start()` and `Trace()` helpers
-- ✅ Convenience helpers (`SetAttribute()`, `GetTraceID()`, etc.)
-- ✅ Context-aware span operations
-
-### Events & Subscribers
-
-- ✅ `subscribers.NewQueue()` → sends to subscribers (PostHog, Mixpanel, Amplitude, Webhook, etc.)
-- ✅ Global `Track()` function
-- ✅ Auto-enrichment with trace context
-- ✅ Queue-based event system
-
-### Logging
-
-- ✅ Structured logging integration with `log/slog`
-- ✅ Automatic trace context injection
-- ✅ Zero configuration
-
-### Production Features
-
-- ✅ Adaptive sampling (10% baseline, 100% errors/slow)
-- ✅ Rate limiting (token bucket)
-- ✅ Circuit breaker (subscriber protection)
-- ✅ PII redaction (email, phone, SSN, credit card, API keys)
-- ✅ Rolling SLO tracking and predictive burn-rate alerts
-
-### Framework Integrations
-
-- ✅ HTTP middleware (net/http) - inbound request tracing
-- ✅ HTTP client - outbound request tracing with automatic propagation
-- ✅ Gin middleware
-- ✅ gRPC instrumentation (server + client)
-
-### Event-Driven Tracing
-
-- ✅ Message queue tracing (Kafka, RabbitMQ, SQS, etc.)
-- ✅ Producer/Consumer middleware with automatic context propagation
-- ✅ Batch processing with fan-in links
-- ✅ Consumer group tracking (rebalance, heartbeat, partition lag)
-- ✅ Message ordering & deduplication (sequence tracking, gap detection)
-- ✅ Enhanced DLQ with reason categories and replay tracking
-- ✅ Webhook/Parking Lot pattern for async callbacks
-- ✅ Workflow/Saga tracing with step linking and retry configuration
-- ✅ Safe baggage schema with type validation and PII detection
-- ✅ Links-based sampling for trace continuity
-
-### Testing
-
-- ✅ InMemorySpanExporter for unit tests
-- ✅ Test helpers in `testing/` package
-
-## Examples
-
-See the `examples/` directory for complete working examples:
-
-- `basic/` - Basic tracing usage
-- `http-server/` - HTTP server with middleware
-- `service-to-service/` - Distributed tracing between services
-- `gin-server/` - Gin framework integration
-- `logging/` - Structured logging integration
-- `analytics/` - Event tracking (in-memory subscriber)
-- `analytics-posthog/` - PostHog event integration
-- `production-example/` - Complete production setup with all hardening features
-
-Run any example:
-
-```bash
-cd examples/basic
-# Debug spans print to stderr and no backend is required
-AUTOTEL_DEBUG=true go run main.go
-```
-
-## Debug Mode
-
-Enable debug mode to see all span operations logged to stderr:
-
-```go
-// Option 1: Via environment variable
-// AUTOTEL_DEBUG=true go run main.go
-
-// Option 2: Programmatically
-cleanup, err := autotel.Init(ctx,
-    autotel.WithService("my-service"),
-    autotel.WithDebug(true), // Enable debug mode
-)
-```
-
-Debug output shows:
-
-- Span creation with trace_id and span_id
-- Attribute setting
-- Error recording
-- Span completion
-- PII redaction (when enabled)
-
-Example debug output:
-
-```
-[autotel] Debug mode enabled
-[autotel] Using AlwaysSample sampler for debug mode
-[autotel] → Start span: ProcessOrder [trace_id=7130bb6d5bb4ef40..., span_id=6bf9a60ec0080bff]
-[autotel]   Set attribute: order.id=12345 [trace_id=7130bb6d5bb4ef40...]
-[autotel] ← End span [trace_id=7130bb6d5bb4ef40..., span_id=6bf9a60ec0080bff]
-```
-
-## Convenience Helpers
-
-Simple functions for common operations without needing to get the span first:
-
-```go
-import "github.com/jagreehal/autotel-go/v2"
-
-// Set single attribute on current span
-autotel.SetAttribute(ctx, "user.id", "123")
-
-// Set multiple attributes at once
-autotel.SetAttributes(ctx, map[string]any{
-    "order.id":    orderID,
-    "order.total": total,
-    "customer.tier": "premium",
-})
-
-// Add a span event
-autotel.AddEvent(ctx, "order.validated", map[string]any{
-    "validator": "schema_v2",
-})
-
-// Record exception (sets span status to ERROR)
-if err != nil {
-    autotel.RecordError(ctx, err, map[string]any{
-        "order.id": orderID,
-    })
-}
-
-// Get IDs for logging
-traceID := autotel.GetTraceID(ctx)
-spanID := autotel.GetSpanID(ctx)
-log.Printf("Processing in trace: %s, span: %s", traceID, spanID)
-
-// Track operation duration (requires span)
-ctx, span := autotel.Start(ctx, "operation")
-start := time.Now()
-// ... do work ...
-autotel.SetDuration(span, start)
-span.End()
-
-// Set HTTP request attributes (requires span)
-ctx, span := autotel.Start(ctx, "httpRequest")
-autotel.SetHTTPRequestAttributes(span, r.Method, r.URL.Path, r.UserAgent())
-span.End()
-
-// Add event with attributes (alternative API, requires span)
-ctx, span := autotel.Start(ctx, "operation")
-autotel.AddEventWithAttributes(span, "cache_hit",
-    "cache.key", "user:123",
-    "cache.ttl", 3600,
-)
-span.End()
-
-// Check if tracing is enabled
-if autotel.IsTracingEnabled(ctx) {
-    // Tracing is active
-}
-```
-
-**Available helpers:**
-
-- `SetAttribute(ctx, key, value)` - Set single span attribute on current span
-- `SetAttributes(ctx, attrs)` - Set multiple span attributes on current span
-- `AddEvent(ctx, name, attrs)` - Add span event to current span
-- `RecordError(ctx, err, attrs)` - Record exception and set error status on current span
-- `GetTraceID(ctx)` - Get current trace ID as hex string
-- `GetSpanID(ctx)` - Get current span ID as hex string
-- `SetDuration(span, start)` - Set operation duration (requires span)
-- `SetHTTPRequestAttributes(span, method, path, userAgent)` - Set HTTP attributes (requires span)
-- `AddEventWithAttributes(span, name, ...)` - Add event with variadic attributes (requires span)
-- `IsTracingEnabled(ctx)` - Check if tracing is active
-
-## Status
-
-Production ready. All core features implemented and tested.
-
-**Version:** 2.3.0
-**Go:** 1.26+
-**License:** MIT
-
-## Version
-
-Current version: `v2.3.0`
-
-```go
-import "github.com/jagreehal/autotel-go/v2"
-
-version := autotel.GetVersion()
-```
-
-## Dependencies
-
-This library uses the latest stable versions of dependencies compatible with Go 1.26+:
-
-- **OpenTelemetry**: v1.46.0
-- **OpenTelemetry Contrib**: v0.71.0
-- **Gin**: v1.12.0
-- **Testify**: v1.12.1 (latest)
-- **gRPC**: v1.84.0
-
-All dependencies are kept up-to-date and verified for compatibility.
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-Built on top of the excellent [OpenTelemetry Go](https://github.com/open-telemetry/opentelemetry-go) project.
+Use an `https://` URL for anything that needs credentials. For gRPC, YAML, per-signal endpoints and the Datadog and Honeycomb presets, see [Configuration](docs/configuration.md).
+
+## When something's wrong
+
+| You see | Do this |
+| --- | --- |
+| `no OTLP endpoint, telemetry stays local` | Set `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| `telemetry not delivered` with `401` | Check your credentials in `OTEL_EXPORTER_OTLP_HEADERS`. |
+| `telemetry not delivered` with `404` | Check the URL. If your backend skips a signal, as Jaeger does, set `OTEL_METRICS_EXPORTER=none` or `OTEL_LOGS_EXPORTER=none`. |
+| `connection refused` | Start your backend, or check the port. |
+| A short program sends nothing | Call `cleanup()` before it exits. `log.Fatal` and `os.Exit` skip your `defer`. |
+| Spans show up as separate traces | Pass the `ctx` from `Start` down to the next call. |
+| HTTP spans say `GET` with no route | Put `HTTPMiddleware` directly around your `ServeMux`. A middleware between them that calls `r.WithContext` hides the route. |
+| Span details print to stderr | That's debug mode, on unless `ENV` or `ENVIRONMENT` is `production`. Turn it off with `autotel.WithDebug(false)`. |
+
+## Before you go to production
+
+- **Set `ENV=production`** to turn off debug output.
+- **Pick a sampling rate.** autotel keeps every trace until you choose. `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` keeps 10%. `WithAdaptiveSampler()` keeps a share of normal traces and every error and slow span.
+- **Add `autotel.WithPIIRedaction()`** to scrub emails, phone numbers and card numbers from spans, logs, metrics and product events.
+- **Add `autotel.WithRuntimeMetrics()`** to see memory, garbage collection and goroutines.
+
+[Running in production](docs/production.md) covers these, plus rate limits, circuit breakers and log files.
+
+## Learn more
+
+- [Workshop](workshop/README.md): thirteen parts that take a bank's ATM from `fmt.Println` to one trace across three services. Start here if you want to learn observability itself.
+- [HTTP and gRPC](docs/http-and-grpc.md): Chi, Gin, Echo, gRPC and HTTP client options.
+- [Databases and LLM calls](docs/database-and-llm.md)
+- [Queues, workflows and events](docs/event-driven.md): Kafka and SQS tracing, sagas and business baggage.
+- [Advanced features](docs/advanced.md): product analytics, SLOs, wide events and structured errors.
+- [Configuration](docs/configuration.md) and [Running in production](docs/production.md)
+- [`examples/`](examples/) has runnable programs. [API reference](https://pkg.go.dev/github.com/jagreehal/autotel-go/v2).
+
+Using a coding assistant? `npx skills add jagreehal/autotel-go --skill autotel-go` teaches it this API.
+
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT License](LICENSE)

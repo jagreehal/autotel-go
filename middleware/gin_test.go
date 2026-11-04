@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	autoteltesting "github.com/jagreehal/autotel-go/v2/testing"
 )
@@ -58,7 +59,7 @@ func TestGinMiddleware_WithError(t *testing.T) {
 }
 
 func TestGinMiddleware_WithParams(t *testing.T) {
-	_, cleanup := autoteltesting.SetupTest(t)
+	exporter, cleanup := autoteltesting.SetupTest(t)
 	defer cleanup()
 
 	gin.SetMode(gin.TestMode)
@@ -71,9 +72,16 @@ func TestGinMiddleware_WithParams(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/users/123", nil)
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+
+	spans := exporter.GetSpans()
+	require.NotEmpty(t, spans)
+	assert.Equal(t, "GET /users/:id", spans[0].Name())
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", spans[0].SpanContext().TraceID().String())
+	assert.Equal(t, "/users/:id", spanAttrString(spans[0], "http.route"))
 }

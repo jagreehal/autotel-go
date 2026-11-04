@@ -46,6 +46,13 @@ var (
 	mu sync.RWMutex
 )
 
+// currentRedactor returns the redactor Init installed, or nil.
+func currentRedactor() textRedactor {
+	mu.RLock()
+	defer mu.RUnlock()
+	return globalPIIRedactor
+}
+
 // setGlobalPIIRedactor sets the global PII redactor (internal use)
 func setGlobalPIIRedactor(pr interface {
 	Redact(key, value string) string

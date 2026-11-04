@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -96,8 +97,9 @@ func attributeValueToString(value any) string {
 // IsTracingEnabled checks if tracing is currently enabled.
 // Returns true if a TracerProvider is set and not a no-op provider.
 func IsTracingEnabled(ctx context.Context) bool {
-	_, span := Start(ctx, "_check")
-	defer span.End()
+	// Left unended on purpose: only ended spans get exported, so asking the
+	// question adds nothing to anyone's traces.
+	_, span := otel.Tracer(tracerName).Start(ctx, "_check")
 	return span.IsRecording()
 }
 

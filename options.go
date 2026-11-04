@@ -28,6 +28,7 @@ func WithService(name string) Option {
 func WithServiceVersion(version string) Option {
 	return func(c *Config) {
 		c.ServiceVersion = version
+		c.versionChosen = true
 	}
 }
 
@@ -35,6 +36,7 @@ func WithServiceVersion(version string) Option {
 func WithEnvironment(env string) Option {
 	return func(c *Config) {
 		c.Environment = env
+		c.environmentChosen = true
 	}
 }
 
@@ -49,6 +51,7 @@ func WithEndpoint(endpoint string) Option {
 func WithProtocol(protocol Protocol) Option {
 	return func(c *Config) {
 		c.Protocol = protocol
+		c.protocolChosen = true
 	}
 }
 
@@ -87,6 +90,29 @@ func WithDebugCapture() Option {
 	}
 }
 
+// WithRuntimeMetrics reports Go runtime metrics: memory, garbage collection,
+// goroutines and scheduler latency. It needs a metrics pipeline, so it does
+// nothing without an endpoint or WithMetricExporters.
+func WithRuntimeMetrics() Option {
+	return func(c *Config) {
+		c.RuntimeMetrics = true
+	}
+}
+
+// WithLogFile also writes Logger output to rolling files of JSON lines, with
+// trace_id and span_id when ctx holds a span.
+//
+//	autotel.Init(ctx, autotel.WithLogFile(autotel.LogFile{
+//	    Dir:      "logs",
+//	    Rotation: autotel.LogRotationHourly,
+//	    MaxFiles: 24,
+//	}))
+func WithLogFile(file LogFile) Option {
+	return func(c *Config) {
+		c.LogFile = &file
+	}
+}
+
 // WithSampler sets a custom sampler
 func WithSampler(sampler trace.Sampler) Option {
 	return func(c *Config) {
@@ -103,18 +129,18 @@ func WithInsecure(insecure bool) Option {
 	}
 }
 
-// WithRateLimit enables rate limiting for span creation.
-// rate is the number of spans per second, burst is the maximum burst size.
+// WithRateLimit caps how many new traces start: rate per second, with bursts up
+// to burst. Spans whose parent was kept don't count, so a trace stays whole.
 func WithRateLimit(rate float64, burst int) Option {
 	return func(c *Config) {
 		c.RateLimiter = ratelimit.NewTokenBucket(rate, burst)
 	}
 }
 
-// WithCircuitBreaker enables circuit breaker protection.
-// failureThreshold is the number of failures before opening the circuit.
-// successThreshold is the number of successes needed to close from half-open.
-// timeout is how long to wait before attempting recovery.
+// WithCircuitBreaker stops starting new traces while your backend is failing.
+// After failureThreshold failed span exports it opens. After timeout it lets
+// traffic through to test the backend, and successThreshold good exports close
+// it again.
 func WithCircuitBreaker(failureThreshold, successThreshold int, timeout time.Duration) Option {
 	return func(c *Config) {
 		c.CircuitBreaker = circuitbreaker.NewCircuitBreaker(failureThreshold, successThreshold, timeout)

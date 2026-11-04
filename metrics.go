@@ -42,10 +42,13 @@ func (m Metric) Histogram(ctx context.Context, name string, value float64, attrs
 	h.Record(ctx, value, metric.WithAttributes(toAttributes(attrs)...))
 }
 
+// toAttributes redacts here, at recording, rather than at export: attributes
+// define a series, so two users' values merge into one redacted series instead
+// of leaving two identical ones that backends reject.
 func toAttributes(attrs map[string]any) []attribute.KeyValue {
 	kvs := make([]attribute.KeyValue, 0, len(attrs))
 	for k, v := range attrs {
-		kvs = append(kvs, attributeFromValue(k, v))
+		kvs = append(kvs, redactedAttribute(k, v))
 	}
 	return kvs
 }

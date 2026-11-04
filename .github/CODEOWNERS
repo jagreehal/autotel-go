@@ -1,0 +1,7 @@
+# Release-critical paths: a tag on main publishes the module to the Go proxy.
+# Keep review on anything that changes what a tag releases.
+/.github/workflows/  @jagreehal
+/.github/CODEOWNERS  @jagreehal
+/go.mod              @jagreehal
+/go.sum              @jagreehal
+/version.go          @jagreehal

@@ -19,8 +19,8 @@ service:
 exporter:
   # OTLP endpoint - supports any OpenTelemetry-compatible backend
   endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}
-  # Protocol: http (default) or grpc
-  protocol: http
+  # Protocol: http/protobuf (default) or grpc
+  protocol: http/protobuf
   # Headers for authentication
   headers:
     # Honeycomb
