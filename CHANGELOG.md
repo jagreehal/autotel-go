@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-11-07
+
+### Changed
+
+- Depend on `executable-stories-go` v0.2.0, its first release the Go proxy can resolve, instead of a pseudo-version. Modules that use both no longer get downgraded when they follow the executable-stories install instructions.
+
 ## [2.4.0] - 2026-11-04
 
 ### Added
