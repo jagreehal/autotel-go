@@ -1,12 +1,12 @@
 package middleware
 
 import (
-	echootel "github.com/labstack/echo-otel/v4"
-	"github.com/labstack/echo/v4"
+	echootel "github.com/labstack/echo-otel/v5"
+	"github.com/labstack/echo/v5"
 )
 
 // EchoMiddleware wraps LabStack's [echootel.NewMiddleware] — the maintained
-// OpenTelemetry instrumentation for Echo v4 (replaces the deprecated
+// OpenTelemetry instrumentation for Echo v5 (replaces the deprecated
 // contrib otelecho package).
 //
 // Example:

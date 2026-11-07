@@ -24,7 +24,7 @@ Query strings are not recorded.
 
 ## Trace Chi, Gin or Echo
 
-These wrap the maintained instrumentations: `otelchi`, contrib `otelgin` and LabStack `echo-otel/v4`. `Init` installs the propagators they need.
+These wrap the maintained instrumentations: `otelchi`, contrib `otelgin` and LabStack `echo-otel/v5`. `Init` installs the propagators they need.
 
 ```go
 r := chi.NewRouter()
