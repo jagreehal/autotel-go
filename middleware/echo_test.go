@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,9 +17,8 @@ func TestEchoMiddleware_RoutePattern(t *testing.T) {
 	defer cleanup()
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(EchoMiddleware("test-service"))
-	e.GET("/todos/:id", func(c echo.Context) error {
+	e.GET("/todos/:id", func(c *echo.Context) error {
 		return c.String(http.StatusOK, c.Param("id"))
 	})
 
@@ -45,9 +44,8 @@ func TestEchoMiddleware_HandlerError(t *testing.T) {
 	defer cleanup()
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(EchoMiddleware("test-service"))
-	e.GET("/boom", func(c echo.Context) error {
+	e.GET("/boom", func(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadGateway, "upstream")
 	})
 

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-07
+
+### Changed
+
+- **Breaking: `middleware.EchoMiddleware` targets Echo v5** (`echo-otel/v5`). Echo v4 has two unfixed advisories ([GO-2026-6875](https://pkg.go.dev/vuln/GO-2026-6875), [GO-2026-6872](https://pkg.go.dev/vuln/GO-2026-6872)) that fail `govulncheck`. Move your app to `github.com/labstack/echo/v5`.
+
 ## [2.4.1] - 2026-11-07
 
 ### Changed
