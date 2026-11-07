@@ -7,7 +7,7 @@ toolchain go1.26.10
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-chi/chi/v5 v5.5.0
-	github.com/jagreehal/executable-stories/packages/executable-stories-go v0.0.0-20261104131756-3610cf4f3f15
+	github.com/jagreehal/executable-stories/packages/executable-stories-go v0.2.0
 	github.com/labstack/echo-otel/v4 v4.0.0
 	github.com/labstack/echo/v4 v4.16.3
 	github.com/riandyrn/otelchi v0.12.3
